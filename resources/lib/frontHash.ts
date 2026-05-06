@@ -161,39 +161,48 @@ export type RankConfig = {
 
 const DEFAULT_RANK: RankConfig = { hashWeight: 0.6, colorWeight: 0.4 };
 
+// Ranqueia TODOS os items e devolve os top-K em ordem ascendente de score.
+// Cada elemento tem o score do PRÓXIMO no ranking como segundoMaisProximo,
+// pra preservar a noção de "gap até o próximo candidato" usada nos gates.
+export function rankearTopK(
+  hashHex: string,
+  colorHex: string | null,
+  items: FrontHashItem[],
+  k = 3,
+  config: RankConfig = DEFAULT_RANK
+): MatchResult[] {
+  if (!items.length) return [];
+  const todos: { id: string; hd: number; cd: number; score: number }[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const hd = hammingHex(hashHex, items[i].h);
+    const itemCor = items[i].c;
+    const cd = colorHex && itemCor ? bhattacharyyaHex(colorHex, itemCor) : 0.5;
+    const score = config.hashWeight * (hd / 256) + config.colorWeight * cd;
+    todos.push({ id: items[i].id, hd, cd, score });
+  }
+  todos.sort((a, b) => a.score - b.score);
+  const out: MatchResult[] = [];
+  const limite = Math.min(k, todos.length);
+  for (let i = 0; i < limite; i++) {
+    const t = todos[i];
+    const proximo = todos[i + 1];
+    out.push({
+      id: t.id,
+      hashDist: t.hd,
+      colorDist: t.cd,
+      score: t.score,
+      scoreSegundoMaisProximo: proximo ? proximo.score : 1,
+    });
+  }
+  return out;
+}
+
 export function rankearMatches(
   hashHex: string,
   colorHex: string | null,
   items: FrontHashItem[],
   config: RankConfig = DEFAULT_RANK
 ): MatchResult | null {
-  if (!items.length) return null;
-  let melhorIdx = -1;
-  let melhorScore = Infinity;
-  let segundoScore = Infinity;
-  let melhorHashDist = 0;
-  let melhorColorDist = 0;
-  for (let i = 0; i < items.length; i++) {
-    const hd = hammingHex(hashHex, items[i].h);
-    const itemCor = items[i].c;
-    const cd = colorHex && itemCor ? bhattacharyyaHex(colorHex, itemCor) : 0.5;
-    const score = config.hashWeight * (hd / 256) + config.colorWeight * cd;
-    if (score < melhorScore) {
-      segundoScore = melhorScore;
-      melhorScore = score;
-      melhorIdx = i;
-      melhorHashDist = hd;
-      melhorColorDist = cd;
-    } else if (score < segundoScore) {
-      segundoScore = score;
-    }
-  }
-  if (melhorIdx < 0) return null;
-  return {
-    id: items[melhorIdx].id,
-    hashDist: melhorHashDist,
-    colorDist: melhorColorDist,
-    score: melhorScore,
-    scoreSegundoMaisProximo: segundoScore,
-  };
+  const top = rankearTopK(hashHex, colorHex, items, 1, config);
+  return top[0] ?? null;
 }

@@ -26,7 +26,7 @@ import type { Sticker } from '@/resources/types';
 import {
   computeColorHistFromImageData,
   computeDHashFromImageData,
-  rankearMatches,
+  rankearTopK,
   type FrontHashesPayload,
   type MatchResult,
 } from '@/resources/lib/frontHash';
@@ -77,27 +77,23 @@ const SCAN_QUICK_KEY = 'figurinhas:scan:quickMode';
 const SCAN_CAPTURA_KEY = 'figurinhas:scan:captura';
 const QUICK_DURATION_MS = 10_000;
 const MAX_NOTIFICACOES_QUICK = 2;
-// Gates de qualidade do scanner de frente. Score combinado é 60% dHash + 40%
-// cor (Bhattacharyya), normalizado para [0..1] (menor = melhor).
-//   - SCORE_MAX: maior score absoluto que aceitamos. 0.45 ≈ "razoavelmente
-//     parecido". Random esperado ~ 0.55.
-//   - SCORE_GAP_MIN: quanto o melhor precisa vencer o 2º. 0.04 = ~10% da escala.
-// Voto temporal de 5 frames + maioria de 3 protege contra ruído pontual.
-const FRONT_SCORE_MAX = 0.45;
-const FRONT_SCORE_GAP_MIN = 0.04;
-const FRONT_TICK_MS = 80;
-const FRONT_HISTORY_SIZE = 3;
-const FRONT_CONSENSUS_MIN = 2;
-// Posições de amostragem por tick (offsets em fração do frame). Tolera o
-// usuário fora de centro: por tick, capturamos cada posição e ficamos com a
-// que pontuou melhor.
+// Estratégia: sempre mostra os top-3 candidatos como botões clicáveis. Auto-
+// fire SÓ pra matches muito limpos (score baixo + gap alto), pra evitar falso
+// positivo. Pra qualquer caso ambíguo, o usuário toca no candidato certo.
+const FRONT_TICK_MS = 120;
+const FRONT_TOP_K = 3;
+const FRONT_AUTO_SCORE_MAX = 0.22;
+const FRONT_AUTO_GAP_MIN = 0.08;
+// Amostragem multi-posição por tick (centro + 4 offsets) com VOTO entre as
+// posições — só consideramos auto-fire se a maioria delas eleger o mesmo id.
 const FRONT_OFFSETS: { dx: number; dy: number }[] = [
   { dx: 0, dy: 0 },
-  { dx: -0.12, dy: 0 },
-  { dx: 0.12, dy: 0 },
-  { dx: 0, dy: -0.12 },
-  { dx: 0, dy: 0.12 },
+  { dx: -0.1, dy: 0 },
+  { dx: 0.1, dy: 0 },
+  { dx: 0, dy: -0.1 },
+  { dx: 0, dy: 0.1 },
 ];
+const FRONT_OFFSET_VOTO_MIN = 3; // 3 das 5 posições no mesmo id pra auto-fire
 
 type ModoScan = 'turbo' | 'legacy';
 type ModoCaptura = 'verso' | 'frente';
@@ -205,10 +201,7 @@ export default function ScanPage() {
   const frontHashesLoadingRef = useRef(false);
   const [frontHashesProntos, setFrontHashesProntos] = useState(false);
   const [frontHashesErro, setFrontHashesErro] = useState<string | null>(null);
-  const [debugFrontMatch, setDebugFrontMatch] = useState<string | null>(null);
-  const [ultimaTentativaFrente, setUltimaTentativaFrente] = useState<MatchResult | null>(null);
-  const [consensoFrente, setConsensoFrente] = useState<{ id: string; count: number } | null>(null);
-  const historicoFrenteRef = useRef<MatchResult[]>([]);
+  const [topKFrente, setTopKFrente] = useState<MatchResult[]>([]);
 
   useEffect(() => {
     try {
@@ -244,9 +237,7 @@ export default function ScanPage() {
 
   const escolherCaptura = useCallback((proximo: ModoCaptura) => {
     setModoCaptura(proximo);
-    historicoFrenteRef.current = [];
-    setConsensoFrente(null);
-    setUltimaTentativaFrente(null);
+    setTopKFrente([]);
     try {
       window.localStorage.setItem(SCAN_CAPTURA_KEY, proximo);
     } catch {}
@@ -776,67 +767,57 @@ export default function ScanPage() {
       }
       try {
         setEscaneando(true);
-        // Amostra várias posições centradas em torno do frame e mantém o de
-        // melhor score. Compensa usuário que não enquadrou perfeito.
-        let ranqueado: MatchResult | null = null;
+        // Pra cada posição, calcula top-K. Depois agrega: o id que ganha
+        // mais "melhor de cada posição" é o candidato auto-fire (se for
+        // limpo o suficiente). Pra UI, o top-3 vem do agregado de TODAS as
+        // posições — colapsa duplicatas pelo melhor score.
+        const todosPorId = new Map<string, MatchResult>();
+        const votosPorId = new Map<string, number>();
         for (const off of FRONT_OFFSETS) {
           const cap = capturarFrente(off.dx, off.dy);
           if (!cap) continue;
           const hash = computeDHashFromImageData(cap.hash);
           const cor = computeColorHistFromImageData(cap.cor);
-          const r = rankearMatches(hash, cor, payload.items);
-          if (r && (!ranqueado || r.score < ranqueado.score)) ranqueado = r;
+          const tops = rankearTopK(hash, cor, payload.items, FRONT_TOP_K);
+          if (!tops.length) continue;
+          // voto desta posição = 1º colocado dela
+          votosPorId.set(tops[0].id, (votosPorId.get(tops[0].id) ?? 0) + 1);
+          // mescla candidatos por id, preservando o melhor score visto
+          for (const r of tops) {
+            const existente = todosPorId.get(r.id);
+            if (!existente || r.score < existente.score) todosPorId.set(r.id, r);
+          }
         }
-        setUltimaTentativaFrente(ranqueado);
-        if (!ranqueado) {
+
+        if (todosPorId.size === 0) {
           if (!cancelado) timeoutId = setTimeout(tickFrente, FRONT_TICK_MS);
           return;
         }
 
-        // janela deslizante de candidatos pra voto temporal
-        const hist = historicoFrenteRef.current;
-        hist.push(ranqueado);
-        if (hist.length > FRONT_HISTORY_SIZE) hist.shift();
+        // top-K consolidado pra UI
+        const top = Array.from(todosPorId.values())
+          .sort((a, b) => a.score - b.score)
+          .slice(0, FRONT_TOP_K);
+        setTopKFrente(top);
 
-        // conta ocorrências de cada id na janela
-        const buckets = new Map<string, MatchResult[]>();
-        for (const r of hist) {
-          const list = buckets.get(r.id);
-          if (list) list.push(r);
-          else buckets.set(r.id, [r]);
-        }
-        let topId = '';
-        let topCount = 0;
-        let topEntries: MatchResult[] = [];
-        buckets.forEach((entries, id) => {
-          if (entries.length > topCount) {
-            topId = id;
-            topCount = entries.length;
-            topEntries = entries;
+        // Auto-fire só se MAIORIA das posições concordou no mesmo id E o
+        // melhor score dele passa nos gates limpos.
+        let idVencedor = '';
+        let votosVencedor = 0;
+        votosPorId.forEach((v, id) => {
+          if (v > votosVencedor) {
+            votosVencedor = v;
+            idVencedor = id;
           }
         });
-        setConsensoFrente({ id: topId, count: topCount });
-
-        if (debugAtivo) {
-          setDebugFrontMatch(
-            `top=${topId} ${topCount}/${hist.length} | última: ${ranqueado.id} score=${ranqueado.score.toFixed(3)} d=${ranqueado.hashDist} c=${ranqueado.colorDist.toFixed(2)}`
-          );
-        }
-
-        if (topCount >= FRONT_CONSENSUS_MIN && !pausadoRef.current) {
-          // pega o melhor entry do consenso e checa qualidade mínima
-          const melhorDoConsenso = topEntries.reduce((a, b) =>
-            a.score < b.score ? a : b
-          );
-          const gap = melhorDoConsenso.scoreSegundoMaisProximo - melhorDoConsenso.score;
-          if (
-            melhorDoConsenso.score <= FRONT_SCORE_MAX &&
-            gap >= FRONT_SCORE_GAP_MIN
-          ) {
-            historicoFrenteRef.current = [];
-            setConsensoFrente(null);
-            const sticker = figurinhaPorId(topId);
-            if (sticker) handlerStickerDetectadoRef.current(sticker);
+        if (votosVencedor >= FRONT_OFFSET_VOTO_MIN && !pausadoRef.current) {
+          const m = todosPorId.get(idVencedor);
+          if (m) {
+            const gap = m.scoreSegundoMaisProximo - m.score;
+            if (m.score <= FRONT_AUTO_SCORE_MAX && gap >= FRONT_AUTO_GAP_MIN) {
+              const sticker = figurinhaPorId(idVencedor);
+              if (sticker) handlerStickerDetectadoRef.current(sticker);
+            }
           }
         }
       } catch {
@@ -1133,29 +1114,17 @@ export default function ScanPage() {
             conteudo = 'Pronto p/ ler';
           } else if (!frontHashesProntos) {
             conteudo = 'Carregando…';
-          } else if (!ultimaTentativaFrente) {
+          } else if (topKFrente.length === 0) {
             conteudo = 'Pronto p/ foto';
           } else {
-            const t = ultimaTentativaFrente;
+            const t = topKFrente[0];
             const gap = t.scoreSegundoMaisProximo - t.score;
-            const consensoCount = consensoFrente?.id === t.id ? consensoFrente.count : 0;
-            const passaConsenso = consensoCount >= FRONT_CONSENSUS_MIN;
-            const passaQualidade = t.score <= FRONT_SCORE_MAX && gap >= FRONT_SCORE_GAP_MIN;
-            if (passaConsenso && passaQualidade) {
+            if (t.score <= FRONT_AUTO_SCORE_MAX && gap >= FRONT_AUTO_GAP_MIN) {
               corBorda = '#22c55e';
               corTexto = '#22c55e';
               corIcone = '#22c55e';
-            } else if (passaConsenso || passaQualidade) {
-              corBorda = '#fbbf24';
-              corTexto = '#fbbf24';
-              corIcone = '#fbbf24';
-            } else {
-              corBorda = 'rgba(255,255,255,0.2)';
-              corTexto = '#9aa6c9';
-              corIcone = '#9aa6c9';
             }
-            const progresso = consensoCount > 0 ? ` ${consensoCount}/${FRONT_HISTORY_SIZE}` : '';
-            conteudo = `${t.id} s=${t.score.toFixed(2)} g=${gap.toFixed(2)}${progresso}`;
+            conteudo = `${t.id} s=${t.score.toFixed(2)}`;
           }
 
           return (
@@ -1386,7 +1355,7 @@ export default function ScanPage() {
                 textOverflow: 'ellipsis',
               }}
             >
-              Enquadre a <b style={{ color: '#22c55e' }}>foto do jogador</b> dentro da moldura
+              Toque no <b style={{ color: '#22c55e' }}>jogador certo</b> abaixo
             </div>
             <div
               style={{
@@ -1400,7 +1369,7 @@ export default function ScanPage() {
                 color: '#fbbf24',
               }}
             >
-              Beta — só Brasil por enquanto
+              Beta — Brasil e Argélia
               {frontHashesErro
                 ? ` · falha ao carregar (${frontHashesErro})`
                 : !frontHashesProntos
@@ -1410,6 +1379,108 @@ export default function ScanPage() {
           </>
         )}
       </div>
+
+      {/* Painel de top-3 candidatos (modo Foto): tap-to-confirm. */}
+      {modoCaptura === 'frente' && frontHashesProntos && (
+        <div
+          style={{
+            position: 'absolute',
+            left: 12,
+            right: 12,
+            bottom: 90,
+            display: 'flex',
+            justifyContent: 'center',
+            gap: 10,
+            pointerEvents: 'none',
+            zIndex: 6,
+          }}
+        >
+          {topKFrente.length === 0 ? (
+            <div
+              style={{
+                color: '#9aa6c9',
+                fontSize: 12,
+                background: 'rgba(0,0,0,0.55)',
+                padding: '6px 12px',
+                borderRadius: 999,
+                pointerEvents: 'auto',
+              }}
+            >
+              Aponte pra figurinha…
+            </div>
+          ) : (
+            topKFrente.map((cand, idx) => {
+              const fig = figurinhaPorId(cand.id);
+              if (!fig) return null;
+              const ehTop = idx === 0;
+              const gap = cand.scoreSegundoMaisProximo - cand.score;
+              const limpo = ehTop && cand.score <= FRONT_AUTO_SCORE_MAX && gap >= FRONT_AUTO_GAP_MIN;
+              return (
+                <button
+                  key={cand.id}
+                  onClick={() => {
+                    pausadoRef.current = true;
+                    handlerStickerDetectadoRef.current(fig);
+                  }}
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: 4,
+                    padding: 6,
+                    borderRadius: 12,
+                    background: 'rgba(10,18,48,0.85)',
+                    border: limpo
+                      ? '2px solid #22c55e'
+                      : ehTop
+                      ? '2px solid #fbbf24'
+                      : '1px solid rgba(255,255,255,0.15)',
+                    cursor: 'pointer',
+                    pointerEvents: 'auto',
+                    backdropFilter: 'blur(6px)',
+                    minWidth: 78,
+                  }}
+                >
+                  <div
+                    style={{
+                      width: 64,
+                      height: 84,
+                      borderRadius: 6,
+                      overflow: 'hidden',
+                      background: '#1a2236',
+                    }}
+                  >
+                    <img
+                      src={fig.imagem}
+                      alt={fig.nome}
+                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                    />
+                  </div>
+                  <div
+                    style={{
+                      color: '#fff',
+                      fontWeight: 800,
+                      fontSize: 11,
+                      letterSpacing: 0.4,
+                    }}
+                  >
+                    {fig.codigo}
+                  </div>
+                  <div
+                    style={{
+                      color: limpo ? '#22c55e' : '#9aa6c9',
+                      fontSize: 10,
+                      fontFamily: 'monospace',
+                    }}
+                  >
+                    s={cand.score.toFixed(2)}
+                  </div>
+                </button>
+              );
+            })
+          )}
+        </div>
+      )}
 
       {debugAtivo && (
         <div
@@ -1499,14 +1570,6 @@ export default function ScanPage() {
                   })}
             </div>
           </div>
-          {modoCaptura === 'frente' && (
-            <div>
-              <div style={{ color: '#94a3b8', marginBottom: 2 }}>Match frente (dHash)</div>
-              <div style={{ fontFamily: 'monospace', color: '#fcd34d' }}>
-                {debugFrontMatch ?? '—'}
-              </div>
-            </div>
-          )}
         </div>
       )}
 

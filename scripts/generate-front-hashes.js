@@ -11,7 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const sharp = require('sharp');
 
-const FILTRO_PREFIXO = 'BRA';
+const FILTRO_PREFIXOS = ['BRA', 'ALG'];
 const ROOT = path.join(__dirname, '..');
 const ARQUIVO_FIGURINHAS = path.join(ROOT, 'resources', 'data', 'figurinhas.ts');
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -109,11 +109,11 @@ async function colorHistHex(arquivo) {
 (async () => {
   const imagens = lerImagensReais();
   const ids = Object.keys(imagens)
-    .filter((id) => id.startsWith(FILTRO_PREFIXO))
+    .filter((id) => FILTRO_PREFIXOS.some((p) => id.startsWith(p)))
     .sort();
 
   if (!ids.length) {
-    console.error(`[front-hashes] nenhum id casa com prefixo "${FILTRO_PREFIXO}"`);
+    console.error(`[front-hashes] nenhum id casa com prefixos ${FILTRO_PREFIXOS.join(',')}`);
     process.exit(1);
   }
 
@@ -139,13 +139,13 @@ async function colorHistHex(arquivo) {
   const payload = {
     version: 2,
     generatedAt: new Date().toISOString(),
-    filtro: FILTRO_PREFIXO,
+    filtro: FILTRO_PREFIXOS.join(','),
     algorithm: 'dHash-17x16-256bit + HS-histogram-12x6-sqrt-uint8',
     items,
   };
   fs.writeFileSync(SAIDA, JSON.stringify(payload, null, 2) + '\n');
   console.log(
-    `[front-hashes] ${items.length}/${ids.length} (filtro ${FILTRO_PREFIXO}) hasheadas em ${path.relative(ROOT, SAIDA)}` +
+    `[front-hashes] ${items.length}/${ids.length} (filtros ${FILTRO_PREFIXOS.join(',')}) hasheadas em ${path.relative(ROOT, SAIDA)}` +
       (ausentes ? ` — ${ausentes} ausentes/falhas` : '')
   );
 })();
