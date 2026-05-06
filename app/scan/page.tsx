@@ -76,13 +76,14 @@ const SCAN_QUICK_KEY = 'figurinhas:scan:quickMode';
 const SCAN_CAPTURA_KEY = 'figurinhas:scan:captura';
 const QUICK_DURATION_MS = 10_000;
 const MAX_NOTIFICACOES_QUICK = 2;
-// Threshold de Hamming para o dHash 256-bit do scanner de frente. Foto de
-// figurinha física carrega ruído de impressão, brilho, perspectiva — então
-// damos uma folga maior na distância absoluta. O gap mínimo até o 2º melhor
-// candidato é o que protege contra confundir jogadores visualmente parecidos
-// (medições internas no catálogo BRA mostraram pares a 20 bits de distância).
-const FRONT_HASH_MAX_DISTANCE = 55;
-const FRONT_HASH_MIN_GAP = 8;
+// Threshold de Hamming para o dHash 256-bit do scanner de frente. Como as
+// imagens-fonte em /public/countries são de qualidade variável (puxadas da
+// internet, não as masters da Panini), a distância ABSOLUTA mesmo num bom
+// match pode ser alta (60-100). A confiança vem do RANKING — se o jogador
+// certo é o mais próximo com folga clara em relação ao 2º, é match.
+// Distância média esperada entre 2 imagens aleatórias = 128 bits.
+const FRONT_HASH_MAX_DISTANCE = 110;
+const FRONT_HASH_MIN_GAP = 12;
 
 type ModoScan = 'turbo' | 'legacy';
 type ModoCaptura = 'verso' | 'frente';
@@ -1033,31 +1034,62 @@ export default function ScanPage() {
         >
           <X size={20} />
         </button>
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            background: 'rgba(0,0,0,0.55)',
-            border: '1px solid rgba(255,255,255,0.1)',
-            color: '#fff',
-            padding: '6px 12px',
-            borderRadius: 999,
-            fontSize: 12,
-            fontWeight: 700,
-          }}
-        >
-          <ScanLine size={14} color="#22c55e" />
-          {escaneando
-            ? 'Lendo…'
-            : modoCaptura === 'frente'
-            ? frontHashesProntos
-              ? ultimaTentativaFrente
-                ? `${ultimaTentativaFrente.id} d=${ultimaTentativaFrente.distance} gap=${ultimaTentativaFrente.segundoMaisProximo - ultimaTentativaFrente.distance}`
-                : 'Pronto p/ foto'
-              : 'Carregando…'
-            : 'Pronto p/ ler'}
-        </div>
+        {(() => {
+          let corBorda = 'rgba(255,255,255,0.1)';
+          let corTexto = '#fff';
+          let corIcone = '#22c55e';
+          let conteudo: React.ReactNode;
+
+          if (escaneando) {
+            conteudo = 'Lendo…';
+          } else if (modoCaptura !== 'frente') {
+            conteudo = 'Pronto p/ ler';
+          } else if (!frontHashesProntos) {
+            conteudo = 'Carregando…';
+          } else if (!ultimaTentativaFrente) {
+            conteudo = 'Pronto p/ foto';
+          } else {
+            const t = ultimaTentativaFrente;
+            const gap = t.segundoMaisProximo - t.distance;
+            const passaDist = t.distance <= FRONT_HASH_MAX_DISTANCE;
+            const passaGap = gap >= FRONT_HASH_MIN_GAP;
+            if (passaDist && passaGap) {
+              corBorda = '#22c55e';
+              corTexto = '#22c55e';
+              corIcone = '#22c55e';
+            } else if (passaDist || passaGap) {
+              corBorda = '#fbbf24';
+              corTexto = '#fbbf24';
+              corIcone = '#fbbf24';
+            } else {
+              corBorda = 'rgba(255,255,255,0.2)';
+              corTexto = '#9aa6c9';
+              corIcone = '#9aa6c9';
+            }
+            conteudo = `${t.id} d=${t.distance} gap=${gap}`;
+          }
+
+          return (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                background: 'rgba(0,0,0,0.55)',
+                border: `1px solid ${corBorda}`,
+                color: corTexto,
+                padding: '6px 12px',
+                borderRadius: 999,
+                fontSize: 12,
+                fontWeight: 700,
+                fontFamily: modoCaptura === 'frente' ? 'monospace' : undefined,
+              }}
+            >
+              <ScanLine size={14} color={corIcone} />
+              {conteudo}
+            </div>
+          );
+        })()}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <button
             onClick={trocarCamera}
