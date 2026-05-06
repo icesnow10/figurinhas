@@ -85,9 +85,9 @@ const MAX_NOTIFICACOES_QUICK = 2;
 // Voto temporal de 5 frames + maioria de 3 protege contra ruído pontual.
 const FRONT_SCORE_MAX = 0.45;
 const FRONT_SCORE_GAP_MIN = 0.04;
-const FRONT_TICK_MS = 250;
-const FRONT_HISTORY_SIZE = 5;
-const FRONT_CONSENSUS_MIN = 3;
+const FRONT_TICK_MS = 80;
+const FRONT_HISTORY_SIZE = 3;
+const FRONT_CONSENSUS_MIN = 2;
 
 type ModoScan = 'turbo' | 'legacy';
 type ModoCaptura = 'verso' | 'frente';
@@ -627,12 +627,15 @@ export default function ScanPage() {
     ctx.drawImage(v, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, 17, 16);
     const hash = ctx.getImageData(0, 0, 17, 16);
 
-    c.width = 64;
-    c.height = 64;
+    // 32x32 = 1024 amostras, 4x mais rápido que 64x64. Histograma normalizado
+    // continua comparável com a fonte gerada offline (Bhattacharyya invariante
+    // ao tamanho da amostra desde que ambos normalizem por total de pixels).
+    c.width = 32;
+    c.height = 32;
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(v, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, 64, 64);
-    const cor = ctx.getImageData(0, 0, 64, 64);
+    ctx.drawImage(v, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, 32, 32);
+    const cor = ctx.getImageData(0, 0, 32, 32);
 
     return { hash, cor };
   }, [calcularCropFrente]);
