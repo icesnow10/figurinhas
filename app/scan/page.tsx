@@ -24,6 +24,7 @@ import { usePerguntaMcd } from '@/resources/hooks/usePerguntaMcd';
 import { HistoricoModal } from '@/components/historico/HistoricoModal';
 import type { Sticker } from '@/resources/types';
 import {
+  computeColorHistFromImageData,
   computeDHashFromImageData,
   rankearMatches,
   type FrontHashesPayload,
@@ -76,16 +77,14 @@ const SCAN_QUICK_KEY = 'figurinhas:scan:quickMode';
 const SCAN_CAPTURA_KEY = 'figurinhas:scan:captura';
 const QUICK_DURATION_MS = 10_000;
 const MAX_NOTIFICACOES_QUICK = 2;
-// Threshold de Hamming para o dHash 256-bit do scanner de frente. Como as
-// imagens-fonte em /public/countries são de qualidade variável (puxadas da
-// internet, não as masters da Panini), a distância ABSOLUTA mesmo num bom
-// match pode ser alta (60-100). A confiança vem do RANKING + VOTO TEMPORAL:
-// vários frames seguidos têm que eleger o mesmo jogador. Distância média
-// esperada entre 2 imagens aleatórias = 128 bits.
-const FRONT_HASH_MAX_DISTANCE = 115;
-const FRONT_HASH_MIN_GAP = 6;
-// Voto temporal: mantemos os últimos N frames e exigimos consenso. Isso
-// dispensa precisão por-frame e filtra brilho/sombra/borrão pontuais.
+// Gates de qualidade do scanner de frente. Score combinado é 60% dHash + 40%
+// cor (Bhattacharyya), normalizado para [0..1] (menor = melhor).
+//   - SCORE_MAX: maior score absoluto que aceitamos. 0.45 ≈ "razoavelmente
+//     parecido". Random esperado ~ 0.55.
+//   - SCORE_GAP_MIN: quanto o melhor precisa vencer o 2º. 0.04 = ~10% da escala.
+// Voto temporal de 5 frames + maioria de 3 protege contra ruído pontual.
+const FRONT_SCORE_MAX = 0.45;
+const FRONT_SCORE_GAP_MIN = 0.04;
 const FRONT_TICK_MS = 250;
 const FRONT_HISTORY_SIZE = 5;
 const FRONT_CONSENSUS_MIN = 3;
@@ -557,65 +556,86 @@ export default function ScanPage() {
     []
   );
 
-  // Captura o pedaço do vídeo que corresponde ao retângulo verde visível
-  // (frente da figurinha, proporção 5x6.5 cm). Faz a matemática do object-fit:
-  // cover pra mapear coordenadas viewport → coordenadas do <video> bruto, senão
-  // o crop fica desalinhado do que o usuário vê. Devolve já 17x16 grayscale-ready
-  // pro dHash.
-  const capturarFrente = useCallback((): ImageData | null => {
-    if (!videoRef.current || !canvasRef.current) return null;
-    const v = videoRef.current;
+  // Calcula a região do <video> bruto que corresponde ao retângulo verde
+  // visível, fazendo a matemática do object-fit: cover (senão o crop fica
+  // desalinhado do que o usuário enxerga). Devolve sx, sy, sw, sh pra usar
+  // em drawImage subsequente.
+  const calcularCropFrente = useCallback(
+    (): { sx: number; sy: number; sw: number; sh: number } | null => {
+      if (!videoRef.current) return null;
+      const v = videoRef.current;
+      const sw = v.videoWidth;
+      const sh = v.videoHeight;
+      const vw = v.clientWidth;
+      const vh = v.clientHeight;
+      if (!sw || !sh || !vw || !vh) return null;
+
+      const FRAME_RATIO_WH = 5 / 6.5; // largura / altura, espelha o overlay
+      let frameW = vw * 0.85;
+      let frameH = frameW / FRAME_RATIO_WH;
+      if (frameH > vh * 0.78) {
+        frameH = vh * 0.78;
+        frameW = frameH * FRAME_RATIO_WH;
+      }
+      const frameX = (vw - frameW) / 2;
+      const frameY = (vh - frameH) / 2;
+
+      const viewportRatio = vw / vh;
+      const videoRatio = sw / sh;
+      let scale: number;
+      let offsetX: number;
+      let offsetY: number;
+      if (videoRatio > viewportRatio) {
+        scale = vh / sh;
+        offsetX = (vw - sw * scale) / 2;
+        offsetY = 0;
+      } else {
+        scale = vw / sw;
+        offsetX = 0;
+        offsetY = (vh - sh * scale) / 2;
+      }
+
+      const sx = Math.max(0, Math.floor((frameX - offsetX) / scale));
+      const sy = Math.max(0, Math.floor((frameY - offsetY) / scale));
+      const sCropW = Math.min(sw - sx, Math.floor(frameW / scale));
+      const sCropH = Math.min(sh - sy, Math.floor(frameH / scale));
+      if (sCropW <= 0 || sCropH <= 0) return null;
+      return { sx, sy, sw: sCropW, sh: sCropH };
+    },
+    []
+  );
+
+  // Captura a região da figurinha em duas resoluções: 17x16 pra dHash e 64x64
+  // pra histograma de cor. Reusa o mesmo canvas escondido (redimensiona entre
+  // os dois drawImage). Devolve null se vídeo ainda não tem dimensões válidas.
+  const capturarFrente = useCallback((): {
+    hash: ImageData;
+    cor: ImageData;
+  } | null => {
+    if (!canvasRef.current || !videoRef.current) return null;
+    const crop = calcularCropFrente();
+    if (!crop) return null;
     const c = canvasRef.current;
-    const sw = v.videoWidth;
-    const sh = v.videoHeight;
-    const vw = v.clientWidth;
-    const vh = v.clientHeight;
-    if (!sw || !sh || !vw || !vh) return null;
-
-    // Frame verde (mantém em sync com o overlay JSX abaixo): 85% da largura
-    // do viewport, altura derivada da proporção real da figurinha (5/6.5).
-    const FRAME_RATIO_WH = 5 / 6.5; // largura / altura
-    let frameW = vw * 0.85;
-    let frameH = frameW / FRAME_RATIO_WH;
-    if (frameH > vh * 0.78) {
-      frameH = vh * 0.78;
-      frameW = frameH * FRAME_RATIO_WH;
-    }
-    const frameX = (vw - frameW) / 2;
-    const frameY = (vh - frameH) / 2;
-
-    // object-fit: cover — escala vídeo pra cobrir todo o viewport, cropando o
-    // eixo "sobrando".
-    const viewportRatio = vw / vh;
-    const videoRatio = sw / sh;
-    let scale: number;
-    let offsetX: number;
-    let offsetY: number;
-    if (videoRatio > viewportRatio) {
-      scale = vh / sh;
-      offsetX = (vw - sw * scale) / 2;
-      offsetY = 0;
-    } else {
-      scale = vw / sw;
-      offsetX = 0;
-      offsetY = (vh - sh * scale) / 2;
-    }
-
-    const sx = Math.max(0, Math.floor((frameX - offsetX) / scale));
-    const sy = Math.max(0, Math.floor((frameY - offsetY) / scale));
-    const sCropW = Math.min(sw - sx, Math.floor(frameW / scale));
-    const sCropH = Math.min(sh - sy, Math.floor(frameH / scale));
-    if (sCropW <= 0 || sCropH <= 0) return null;
-
-    c.width = 17;
-    c.height = 16;
+    const v = videoRef.current;
     const ctx = c.getContext('2d', { willReadFrequently: true });
     if (!ctx) return null;
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(v, sx, sy, sCropW, sCropH, 0, 0, 17, 16);
-    return ctx.getImageData(0, 0, 17, 16);
-  }, []);
+
+    c.width = 17;
+    c.height = 16;
+    ctx.drawImage(v, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, 17, 16);
+    const hash = ctx.getImageData(0, 0, 17, 16);
+
+    c.width = 64;
+    c.height = 64;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(v, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, 64, 64);
+    const cor = ctx.getImageData(0, 0, 64, 64);
+
+    return { hash, cor };
+  }, [calcularCropFrente]);
 
   useEffect(() => {
     handlerStickerDetectadoRef.current = (sticker: Sticker) => {
@@ -735,13 +755,14 @@ export default function ScanPage() {
       }
       try {
         setEscaneando(true);
-        const img = capturarFrente();
-        if (!img) {
+        const cap = capturarFrente();
+        if (!cap) {
           timeoutId = setTimeout(tickFrente, FRONT_TICK_MS);
           return;
         }
-        const hash = computeDHashFromImageData(img);
-        const ranqueado = rankearMatches(hash, payload.items);
+        const hash = computeDHashFromImageData(cap.hash);
+        const cor = computeColorHistFromImageData(cap.cor);
+        const ranqueado = rankearMatches(hash, cor, payload.items);
         setUltimaTentativaFrente(ranqueado);
         if (!ranqueado) {
           if (!cancelado) timeoutId = setTimeout(tickFrente, FRONT_TICK_MS);
@@ -774,19 +795,19 @@ export default function ScanPage() {
 
         if (debugAtivo) {
           setDebugFrontMatch(
-            `top=${topId} ${topCount}/${hist.length} | última: ${ranqueado.id} d=${ranqueado.distance} gap=${ranqueado.segundoMaisProximo - ranqueado.distance}`
+            `top=${topId} ${topCount}/${hist.length} | última: ${ranqueado.id} score=${ranqueado.score.toFixed(3)} d=${ranqueado.hashDist} c=${ranqueado.colorDist.toFixed(2)}`
           );
         }
 
         if (topCount >= FRONT_CONSENSUS_MIN && !pausadoRef.current) {
           // pega o melhor entry do consenso e checa qualidade mínima
           const melhorDoConsenso = topEntries.reduce((a, b) =>
-            a.distance < b.distance ? a : b
+            a.score < b.score ? a : b
           );
-          const gap = melhorDoConsenso.segundoMaisProximo - melhorDoConsenso.distance;
+          const gap = melhorDoConsenso.scoreSegundoMaisProximo - melhorDoConsenso.score;
           if (
-            melhorDoConsenso.distance <= FRONT_HASH_MAX_DISTANCE &&
-            gap >= FRONT_HASH_MIN_GAP
+            melhorDoConsenso.score <= FRONT_SCORE_MAX &&
+            gap >= FRONT_SCORE_GAP_MIN
           ) {
             historicoFrenteRef.current = [];
             setConsensoFrente(null);
@@ -1092,10 +1113,10 @@ export default function ScanPage() {
             conteudo = 'Pronto p/ foto';
           } else {
             const t = ultimaTentativaFrente;
-            const gap = t.segundoMaisProximo - t.distance;
+            const gap = t.scoreSegundoMaisProximo - t.score;
             const consensoCount = consensoFrente?.id === t.id ? consensoFrente.count : 0;
             const passaConsenso = consensoCount >= FRONT_CONSENSUS_MIN;
-            const passaQualidade = t.distance <= FRONT_HASH_MAX_DISTANCE && gap >= FRONT_HASH_MIN_GAP;
+            const passaQualidade = t.score <= FRONT_SCORE_MAX && gap >= FRONT_SCORE_GAP_MIN;
             if (passaConsenso && passaQualidade) {
               corBorda = '#22c55e';
               corTexto = '#22c55e';
@@ -1110,7 +1131,7 @@ export default function ScanPage() {
               corIcone = '#9aa6c9';
             }
             const progresso = consensoCount > 0 ? ` ${consensoCount}/${FRONT_HISTORY_SIZE}` : '';
-            conteudo = `${t.id} d=${t.distance} gap=${gap}${progresso}`;
+            conteudo = `${t.id} s=${t.score.toFixed(2)} g=${gap.toFixed(2)}${progresso}`;
           }
 
           return (

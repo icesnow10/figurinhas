@@ -1,8 +1,11 @@
-// dHash 17x16 perceptual hash + Hamming match para o scanner de frente.
-// O hash gerado aqui DEVE bater bit-a-bit com o que scripts/generate-front-hashes.js
-// produz a partir das imagens-fonte em /public/countries.
+// Matching de frente da figurinha — duas assinaturas combinadas:
+//   1. dHash 17x16 (256 bits) — captura a "forma" da imagem (gradientes locais)
+//   2. Histograma HSV (apenas H+S, 12x6 bins) — captura a paleta de cores
+//      ignorando brilho (V), pra ser robusto a iluminação variável.
+// O score final é uma soma ponderada dos dois (60% hash + 40% cor).
+// As funções deste arquivo DEVEM bater bit-a-bit com scripts/generate-front-hashes.js.
 
-export type FrontHashItem = { id: string; h: string };
+export type FrontHashItem = { id: string; h: string; c?: string };
 
 export type FrontHashesPayload = {
   version: number;
@@ -25,6 +28,8 @@ const POPCOUNT = (() => {
   }
   return t;
 })();
+
+// ---------- dHash ----------
 
 export function computeDHashFromImageData(img: ImageData): string {
   if (img.width !== 17 || img.height !== 16) {
@@ -76,39 +81,119 @@ export function hammingHex(a: string, b: string): number {
   return dist;
 }
 
-export type MatchResult = {
-  id: string;
-  distance: number;
-  segundoMaisProximo: number;
-};
+// ---------- Histograma HSV ----------
 
-export function rankearMatches(hash: string, items: FrontHashItem[]): MatchResult | null {
-  let melhorId = '';
-  let melhor = Infinity;
-  let segundo = Infinity;
-  for (let i = 0; i < items.length; i++) {
-    const d = hammingHex(hash, items[i].h);
-    if (d < melhor) {
-      segundo = melhor;
-      melhor = d;
-      melhorId = items[i].id;
-    } else if (d < segundo) {
-      segundo = d;
+// Computa histograma 2D HxS (12x6 = 72 bins) a partir de um ImageData RGB.
+// Mesma lógica do script Node — output sqrt-encoded uint8 hex.
+export function computeColorHistFromImageData(img: ImageData): string {
+  const data = img.data;
+  const total = img.width * img.height;
+  const bins = new Float32Array(72);
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i] / 255;
+    const g = data[i + 1] / 255;
+    const b = data[i + 2] / 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const delta = max - min;
+    let h = 0;
+    if (delta > 0) {
+      if (max === r) h = ((g - b) / delta) % 6;
+      else if (max === g) h = (b - r) / delta + 2;
+      else h = (r - g) / delta + 4;
+      h *= 60;
+      if (h < 0) h += 360;
     }
+    const s = max > 0 ? delta / max : 0;
+    const hBin = Math.min(11, Math.floor(h / 30));
+    const sBin = Math.min(5, Math.floor(s * 6));
+    bins[hBin * 6 + sBin]++;
   }
-  if (melhor === Infinity) return null;
-  return { id: melhorId, distance: melhor, segundoMaisProximo: segundo };
+  let hex = '';
+  for (let i = 0; i < 72; i++) {
+    const norm = bins[i] / total;
+    const q = Math.min(255, Math.round(Math.sqrt(norm) * 255));
+    hex += q.toString(16).padStart(2, '0');
+  }
+  return hex;
 }
 
-export function findBestMatch(
-  hash: string,
+// Distância Bhattacharyya: 1 - sum(sqrt(a*b)). Range [0, 1], menor = mais
+// parecido. Robusto a histogramas esparsos.
+export function bhattacharyyaHex(aHex: string, bHex: string): number {
+  if (aHex.length !== bHex.length) return 1;
+  const a = hexToBytes(aHex);
+  const b = hexToBytes(bHex);
+  // bins armazenados como sqrt(p)*255 — desfaz o sqrt antes de comparar
+  let sumA = 0;
+  let sumB = 0;
+  const pa = new Float32Array(a.length);
+  const pb = new Float32Array(b.length);
+  for (let i = 0; i < a.length; i++) {
+    pa[i] = (a[i] / 255) ** 2;
+    pb[i] = (b[i] / 255) ** 2;
+    sumA += pa[i];
+    sumB += pb[i];
+  }
+  // re-normaliza por causa de erros de quantização
+  if (sumA <= 0 || sumB <= 0) return 1;
+  let bc = 0;
+  for (let i = 0; i < a.length; i++) {
+    bc += Math.sqrt((pa[i] / sumA) * (pb[i] / sumB));
+  }
+  return Math.max(0, 1 - bc);
+}
+
+// ---------- Ranking combinado ----------
+
+export type MatchResult = {
+  id: string;
+  hashDist: number; // 0..256
+  colorDist: number; // 0..1
+  score: number; // combinado, 0..1
+  scoreSegundoMaisProximo: number;
+};
+
+export type RankConfig = {
+  hashWeight: number;
+  colorWeight: number;
+};
+
+const DEFAULT_RANK: RankConfig = { hashWeight: 0.6, colorWeight: 0.4 };
+
+export function rankearMatches(
+  hashHex: string,
+  colorHex: string | null,
   items: FrontHashItem[],
-  maxDistance: number,
-  minGap = 0
+  config: RankConfig = DEFAULT_RANK
 ): MatchResult | null {
-  const melhor = rankearMatches(hash, items);
-  if (!melhor) return null;
-  if (melhor.distance > maxDistance) return null;
-  if (melhor.segundoMaisProximo - melhor.distance < minGap) return null;
-  return melhor;
+  if (!items.length) return null;
+  let melhorIdx = -1;
+  let melhorScore = Infinity;
+  let segundoScore = Infinity;
+  let melhorHashDist = 0;
+  let melhorColorDist = 0;
+  for (let i = 0; i < items.length; i++) {
+    const hd = hammingHex(hashHex, items[i].h);
+    const itemCor = items[i].c;
+    const cd = colorHex && itemCor ? bhattacharyyaHex(colorHex, itemCor) : 0.5;
+    const score = config.hashWeight * (hd / 256) + config.colorWeight * cd;
+    if (score < melhorScore) {
+      segundoScore = melhorScore;
+      melhorScore = score;
+      melhorIdx = i;
+      melhorHashDist = hd;
+      melhorColorDist = cd;
+    } else if (score < segundoScore) {
+      segundoScore = score;
+    }
+  }
+  if (melhorIdx < 0) return null;
+  return {
+    id: items[melhorIdx].id,
+    hashDist: melhorHashDist,
+    colorDist: melhorColorDist,
+    score: melhorScore,
+    scoreSegundoMaisProximo: segundoScore,
+  };
 }
