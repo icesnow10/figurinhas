@@ -86,7 +86,7 @@ const FRONT_HASH_MAX_DISTANCE = 115;
 const FRONT_HASH_MIN_GAP = 6;
 // Voto temporal: mantemos os últimos N frames e exigimos consenso. Isso
 // dispensa precisão por-frame e filtra brilho/sombra/borrão pontuais.
-const FRONT_TICK_MS = 700;
+const FRONT_TICK_MS = 250;
 const FRONT_HISTORY_SIZE = 5;
 const FRONT_CONSENSUS_MIN = 3;
 
