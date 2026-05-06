@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "generatedAt": "2026-05-06T22:28:08.177Z",
+  "filtro": "BRA",
+  "algorithm": "dHash-17x16-256bit",
+  "items": [
+    {
+      "id": "BRA01",
+      "h": "b86a369f229efaa01e87869eca2c4b2dcb2c9726062f4d2dfb2261b044ac502e"
+    },
+    {
+      "id": "BRA02",
+      "h": "9137c05f605e747ed4e364e3c4e3e0dc7cfc66dc36da243b283d9c3b3cfccccc"
+    },
+    {
+      "id": "BRA03",
+      "h": "9137c05f205e607f84e324e3c0e3c8dc9cf866dc34da643b683d343a3cfcdccc"
+    },
+    {
+      "id": "BRA04",
+      "h": "9937845f705e707ef4e664e3e4e3e7c3c7e39bc38ed18e31dc384c394cfd44cc"
+    },
+    {
+      "id": "BRA05",
+      "h": "8937845f205f247f14e324e304f387c38fe79bc48ed19e389c304c395c7d94cc"
+    },
+    {
+      "id": "BRA06",
+      "h": "8937845f205f247f04e324e384e387c383e799c6ced18e31dc7266324cfc4ccc"
+    },
+    {
+      "id": "BRA07",
+      "h": "9937845f205e647f84e384e384f383c387e79cc287c79e319c3134383cfcc0cc"
+    },
+    {
+      "id": "BRA08",
+      "h": "8936445f205f207e04e304e384f385c38fe53ac28ed19c319c303c381c7c3ccc"
+    },
+    {
+      "id": "BRA09",
+      "h": "c937845f305f207fc4e364e384f3c7c387e79bc48ed18e3198315c3a5c7994cd"
+    },
+    {
+      "id": "BRA10",
+      "h": "9137c45f605e647f54e364e3e4f3c7c38fe53bc08ed19e319c3058385c7da0cd"
+    },
+    {
+      "id": "BRA11",
+      "h": "3937305f205f807f64e364e3c4f3c7c38be71dc4ced18e31cc3c4e324c79a4cd"
+    },
+    {
+      "id": "BRA12",
+      "h": "c937045f205f207f24e364e3c4f385c78ee71ed08ed1cc31983c6c395c7940ce"
+    },
+    {
+      "id": "BRA13",
+      "h": "58975887b8c66ca60ea69ea60cb3aec52cce1ea65ea61ea61ca71aa6eda7a2c7"
+    },
+    {
+      "id": "BRA14",
+      "h": "8937845f205f647f24e384e38cf385c386e71ec08ed1cc319830ac399c7d94cc"
+    },
+    {
+      "id": "BRA15",
+      "h": "8937245f205ee07ec4e3cce3c4e387c38ae7dcc2ced1cc30c930bc389c7c94cc"
+    },
+    {
+      "id": "BRA16",
+      "h": "c937245f205f207e44e384e3c4f387c38fe71bc28ed38e31d830dc389c784ccc"
+    },
+    {
+      "id": "BRA17",
+      "h": "9936845f605f607ff4e364e3c4f3c5c38de79ac28ed1de319c30a4392c7922cd"
+    },
+    {
+      "id": "BRA18",
+      "h": "d136845f305f307f9ce314e384e307c38fe59fc28ed19c389c3066312cfc4ccc"
+    },
+    {
+      "id": "BRA19",
+      "h": "c937245f305f607f24e384e3c4f387c38fe78ec38ed19e309c32d8389cfc0ccc"
+    },
+    {
+      "id": "BRA20",
+      "h": "c936c45f305f247f84e3a4e384f1c7c387e71bc08ed18e319c68bc38dc7c4ccc"
+    }
+  ]
+}

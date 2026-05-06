@@ -14,6 +14,8 @@ import {
   FlashlightOff,
   History,
   Bolt,
+  Image as ImageIcon,
+  Type,
 } from 'lucide-react';
 import { FIGURINHAS, figurinhaPorId, temVersaoMcDonalds } from '@/resources/data/figurinhas';
 import { useColecao } from '@/resources/hooks/useColecao';
@@ -21,6 +23,11 @@ import { useHistorico } from '@/resources/hooks/useHistorico';
 import { usePerguntaMcd } from '@/resources/hooks/usePerguntaMcd';
 import { HistoricoModal } from '@/components/historico/HistoricoModal';
 import type { Sticker } from '@/resources/types';
+import {
+  computeDHashFromImageData,
+  findBestMatch,
+  type FrontHashesPayload,
+} from '@/resources/lib/frontHash';
 
 function normalizarCodigo(raw: string): string {
   const limpo = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -65,10 +72,29 @@ const SCAN_DEBUG_KEY = 'figurinhas:scan:debug';
 const SCAN_TURBO_KEY = 'figurinhas:scan:turbo'; // legado, migrado para SCAN_MODE_KEY
 const SCAN_MODE_KEY = 'figurinhas:scan:mode';
 const SCAN_QUICK_KEY = 'figurinhas:scan:quickMode';
+const SCAN_CAPTURA_KEY = 'figurinhas:scan:captura';
 const QUICK_DURATION_MS = 10_000;
 const MAX_NOTIFICACOES_QUICK = 2;
+// Threshold de Hamming para o dHash 256-bit do scanner de frente. Foto de
+// figurinha física carrega ruído de impressão, brilho, perspectiva — então
+// damos uma folga maior na distância absoluta. O gap mínimo até o 2º melhor
+// candidato é o que protege contra confundir jogadores visualmente parecidos
+// (medições internas no catálogo BRA mostraram pares a 20 bits de distância).
+const FRONT_HASH_MAX_DISTANCE = 55;
+const FRONT_HASH_MIN_GAP = 8;
 
 type ModoScan = 'turbo' | 'legacy';
+type ModoCaptura = 'verso' | 'frente';
+
+function lerModoCaptura(): ModoCaptura {
+  if (typeof window === 'undefined') return 'verso';
+  try {
+    const salvo = window.localStorage.getItem(SCAN_CAPTURA_KEY);
+    return salvo === 'frente' ? 'frente' : 'verso';
+  } catch {
+    return 'verso';
+  }
+}
 
 function lerModoScan(): ModoScan {
   if (typeof window === 'undefined') return 'turbo';
@@ -151,6 +177,7 @@ export default function ScanPage() {
   const [debugFrame, setDebugFrame] = useState<string | null>(null);
   const [debugCandidatos, setDebugCandidatos] = useState<string[]>([]);
   const [modoScan, setModoScan] = useState<ModoScan>('turbo');
+  const [modoCaptura, setModoCaptura] = useState<ModoCaptura>('verso');
   const [modalConfigAberto, setModalConfigAberto] = useState(false);
   const [flashAtivo, setFlashAtivo] = useState(false);
   const [flashSuportado, setFlashSuportado] = useState(false);
@@ -158,6 +185,11 @@ export default function ScanPage() {
   const [historicoAberto, setHistoricoAberto] = useState(false);
   const [notifApi, notifContext] = notification.useNotification();
   const quickModeRef = useRef(false);
+  const frontHashesRef = useRef<FrontHashesPayload | null>(null);
+  const frontHashesLoadingRef = useRef(false);
+  const [frontHashesProntos, setFrontHashesProntos] = useState(false);
+  const [frontHashesErro, setFrontHashesErro] = useState<string | null>(null);
+  const [debugFrontMatch, setDebugFrontMatch] = useState<string | null>(null);
 
   useEffect(() => {
     try {
@@ -165,6 +197,37 @@ export default function ScanPage() {
       setQuickMode(window.localStorage.getItem(SCAN_QUICK_KEY) === '1');
     } catch {}
     setModoScan(lerModoScan());
+    setModoCaptura(lerModoCaptura());
+  }, []);
+
+  // Lazy-load dos hashes de frente quando o usuário entra no modo Frente.
+  useEffect(() => {
+    if (modoCaptura !== 'frente') return;
+    if (frontHashesRef.current || frontHashesLoadingRef.current) return;
+    frontHashesLoadingRef.current = true;
+    fetch('/scan-fronts.json', { cache: 'force-cache' })
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<FrontHashesPayload>;
+      })
+      .then((payload) => {
+        frontHashesRef.current = payload;
+        setFrontHashesProntos(true);
+        setFrontHashesErro(null);
+      })
+      .catch((e) => {
+        setFrontHashesErro(e?.message ?? 'falha ao carregar hashes');
+      })
+      .finally(() => {
+        frontHashesLoadingRef.current = false;
+      });
+  }, [modoCaptura]);
+
+  const escolherCaptura = useCallback((proximo: ModoCaptura) => {
+    setModoCaptura(proximo);
+    try {
+      window.localStorage.setItem(SCAN_CAPTURA_KEY, proximo);
+    } catch {}
   }, []);
 
   useEffect(() => {
@@ -481,6 +544,31 @@ export default function ScanPage() {
     []
   );
 
+  // Captura central vertical proporção figurinha (~5:7) e devolve já reduzido
+  // para 17x16 — formato esperado pelo dHash. Reusa o canvas escondido já
+  // existente; o tamanho diferente do OCR não é problema (canvas é redimensionado
+  // a cada chamada).
+  const capturarFrente = useCallback((): ImageData | null => {
+    if (!videoRef.current || !canvasRef.current) return null;
+    const v = videoRef.current;
+    const c = canvasRef.current;
+    const w = v.videoWidth;
+    const h = v.videoHeight;
+    if (!w || !h) return null;
+    const recH = Math.floor(h * 0.85);
+    const recW = Math.min(Math.floor(recH * (5 / 7)), Math.floor(w * 0.9));
+    const sx = Math.floor((w - recW) / 2);
+    const sy = Math.floor((h - recH) / 2);
+    c.width = 17;
+    c.height = 16;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(v, sx, sy, recW, recH, 0, 0, 17, 16);
+    return ctx.getImageData(0, 0, 17, 16);
+  }, []);
+
   useEffect(() => {
     handlerStickerDetectadoRef.current = (sticker: Sticker) => {
       const adicionarFinal = (idEscolhido: string) => {
@@ -551,17 +639,17 @@ export default function ScanPage() {
     let timeoutId: any = null;
     let cancelado = false;
 
-    const tick = async () => {
+    const tickVerso = async () => {
       if (cancelado) return;
       const worker = workerRef.current;
       const v = videoRef.current;
       if (!worker || !v || v.readyState < 2 || pausadoRef.current) {
-        timeoutId = setTimeout(tick, 350);
+        timeoutId = setTimeout(tickVerso, 350);
         return;
       }
       const canvas = capturarFrame(turboAtivo);
       if (!canvas) {
-        timeoutId = setTimeout(tick, 350);
+        timeoutId = setTimeout(tickVerso, 350);
         return;
       }
       try {
@@ -586,10 +674,52 @@ export default function ScanPage() {
       } finally {
         setEscaneando(false);
       }
-      if (!cancelado) timeoutId = setTimeout(tick, turboAtivo ? 350 : 600);
+      if (!cancelado) timeoutId = setTimeout(tickVerso, turboAtivo ? 350 : 600);
+    };
+
+    const tickFrente = () => {
+      if (cancelado) return;
+      const v = videoRef.current;
+      const payload = frontHashesRef.current;
+      if (!v || v.readyState < 2 || pausadoRef.current || !payload) {
+        timeoutId = setTimeout(tickFrente, 500);
+        return;
+      }
+      try {
+        setEscaneando(true);
+        const img = capturarFrente();
+        if (!img) {
+          timeoutId = setTimeout(tickFrente, 500);
+          return;
+        }
+        const hash = computeDHashFromImageData(img);
+        const match = findBestMatch(
+          hash,
+          payload.items,
+          FRONT_HASH_MAX_DISTANCE,
+          FRONT_HASH_MIN_GAP
+        );
+        if (debugAtivo) {
+          setDebugFrontMatch(
+            match
+              ? `${match.id} (d=${match.distance}, 2º=${match.segundoMaisProximo})`
+              : `sem match (mín>${FRONT_HASH_MAX_DISTANCE})`
+          );
+        }
+        if (match && !pausadoRef.current) {
+          const sticker = figurinhaPorId(match.id);
+          if (sticker) handlerStickerDetectadoRef.current(sticker);
+        }
+      } catch {
+        // ignora erro pontual e segue
+      } finally {
+        setEscaneando(false);
+      }
+      if (!cancelado) timeoutId = setTimeout(tickFrente, 500);
     };
 
     loopAtivoRef.current = true;
+    const tick = modoCaptura === 'frente' ? tickFrente : tickVerso;
     timeoutId = setTimeout(tick, 800);
 
     return () => {
@@ -597,7 +727,7 @@ export default function ScanPage() {
       loopAtivoRef.current = false;
       if (timeoutId) clearTimeout(timeoutId);
     };
-  }, [capturarFrame, debugAtivo, turboAtivo]);
+  }, [capturarFrame, capturarFrente, debugAtivo, turboAtivo, modoCaptura, frontHashesProntos]);
 
   const fig = buscarFigurinha(normalizarCodigo(edicaoManual));
   const origemAtual = quickOrigemRef.current;
@@ -773,40 +903,60 @@ export default function ScanPage() {
         }}
       />
 
-      {/* Moldura do scan */}
-      <div
-        style={{
-          position: 'absolute',
-          left: '17.5%',
-          top: '36%',
-          width: '65%',
-          height: '28%',
-          border: '2px solid #22c55e',
-          borderRadius: 14,
-          boxShadow: '0 0 24px rgba(34,197,94,0.4)',
-          pointerEvents: 'none',
-        }}
-      />
+      {/* Moldura do scan: horizontal para o verso (código), vertical para a frente (foto) */}
+      {modoCaptura === 'verso' ? (
+        <div
+          style={{
+            position: 'absolute',
+            left: '17.5%',
+            top: '36%',
+            width: '65%',
+            height: '28%',
+            border: '2px solid #22c55e',
+            borderRadius: 14,
+            boxShadow: '0 0 24px rgba(34,197,94,0.4)',
+            pointerEvents: 'none',
+          }}
+        />
+      ) : (
+        <div
+          style={{
+            position: 'absolute',
+            left: '25%',
+            top: '12%',
+            width: '50%',
+            height: '76%',
+            border: '2px solid #22c55e',
+            borderRadius: 14,
+            boxShadow: '0 0 24px rgba(34,197,94,0.4)',
+            pointerEvents: 'none',
+          }}
+        />
+      )}
 
-      {/* Linha de scan animada */}
-      <style>{`
-        @keyframes scanLine {
-          0% { top: 36%; opacity: 0.2; }
-          50% { opacity: 1; }
-          100% { top: 64%; opacity: 0.2; }
-        }
-      `}</style>
-      <div
-        style={{
-          position: 'absolute',
-          left: '17.5%',
-          width: '65%',
-          height: 2,
-          background: 'linear-gradient(90deg, transparent, #22c55e, transparent)',
-          animation: 'scanLine 2.4s ease-in-out infinite',
-          pointerEvents: 'none',
-        }}
-      />
+      {/* Linha de scan animada (apenas no verso, onde tem janela horizontal) */}
+      {modoCaptura === 'verso' && (
+        <>
+          <style>{`
+            @keyframes scanLine {
+              0% { top: 36%; opacity: 0.2; }
+              50% { opacity: 1; }
+              100% { top: 64%; opacity: 0.2; }
+            }
+          `}</style>
+          <div
+            style={{
+              position: 'absolute',
+              left: '17.5%',
+              width: '65%',
+              height: 2,
+              background: 'linear-gradient(90deg, transparent, #22c55e, transparent)',
+              animation: 'scanLine 2.4s ease-in-out infinite',
+              pointerEvents: 'none',
+            }}
+          />
+        </>
+      )}
 
       {/* Topo: botão fechar + status */}
       <div
@@ -855,7 +1005,13 @@ export default function ScanPage() {
           }}
         >
           <ScanLine size={14} color="#22c55e" />
-          {escaneando ? 'Lendo…' : 'Pronto p/ ler'}
+          {escaneando
+            ? 'Lendo…'
+            : modoCaptura === 'frente'
+            ? frontHashesProntos
+              ? 'Pronto p/ foto'
+              : 'Carregando…'
+            : 'Pronto p/ ler'}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <button
@@ -953,13 +1109,72 @@ export default function ScanPage() {
         </div>
       </div>
 
+      {/* Toggle Verso/Frente: pílula no topo central, abaixo do header */}
+      <div
+        style={{
+          position: 'absolute',
+          top: 64,
+          left: 0,
+          right: 0,
+          display: 'flex',
+          justifyContent: 'center',
+          pointerEvents: 'none',
+          zIndex: 6,
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            background: 'rgba(0,0,0,0.65)',
+            border: '1px solid rgba(255,255,255,0.12)',
+            borderRadius: 999,
+            padding: 4,
+            gap: 2,
+            pointerEvents: 'auto',
+            backdropFilter: 'blur(6px)',
+          }}
+        >
+          {([
+            { id: 'verso' as const, label: 'Código', icone: Type },
+            { id: 'frente' as const, label: 'Foto', icone: ImageIcon },
+          ]).map((opt) => {
+            const ativo = modoCaptura === opt.id;
+            const Icone = opt.icone;
+            return (
+              <button
+                key={opt.id}
+                onClick={() => escolherCaptura(opt.id)}
+                aria-pressed={ativo}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '6px 14px',
+                  borderRadius: 999,
+                  background: ativo ? '#22c55e' : 'transparent',
+                  color: ativo ? '#0a1230' : '#e6ebff',
+                  border: 'none',
+                  cursor: 'pointer',
+                  fontWeight: 700,
+                  fontSize: 12,
+                  letterSpacing: 0.3,
+                }}
+              >
+                <Icone size={14} />
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Texto guia logo abaixo da moldura verde */}
       <div
         style={{
           position: 'absolute',
           left: 0,
           right: 0,
-          top: 'calc(64% + 12px)',
+          top: modoCaptura === 'verso' ? 'calc(64% + 12px)' : 'calc(88% + 4px)',
           textAlign: 'center',
           color: '#fff',
           textShadow: '0 1px 4px rgba(0,0,0,0.7)',
@@ -967,30 +1182,67 @@ export default function ScanPage() {
           padding: '0 8px',
         }}
       >
-        <div
-          style={{
-            fontSize: 13,
-            fontWeight: 600,
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-          }}
-        >
-          Centralize o <b style={{ color: '#22c55e' }}>código do cromo</b> no quadro verde
-        </div>
-        <div
-          style={{
-            fontSize: 11,
-            opacity: 0.75,
-            marginTop: 4,
-            fontWeight: 500,
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-          }}
-        >
-          Ex: BRA01 ou 33 — leitura automática
-        </div>
+        {modoCaptura === 'verso' ? (
+          <>
+            <div
+              style={{
+                fontSize: 13,
+                fontWeight: 600,
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              Centralize o <b style={{ color: '#22c55e' }}>código do cromo</b> no quadro verde
+            </div>
+            <div
+              style={{
+                fontSize: 11,
+                opacity: 0.75,
+                marginTop: 4,
+                fontWeight: 500,
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              Ex: BRA01 ou 33 — leitura automática
+            </div>
+          </>
+        ) : (
+          <>
+            <div
+              style={{
+                fontSize: 13,
+                fontWeight: 600,
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              Enquadre a <b style={{ color: '#22c55e' }}>foto do jogador</b> dentro da moldura
+            </div>
+            <div
+              style={{
+                fontSize: 11,
+                opacity: 0.85,
+                marginTop: 4,
+                fontWeight: 600,
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                color: '#fbbf24',
+              }}
+            >
+              Beta — só Brasil por enquanto
+              {frontHashesErro
+                ? ` · falha ao carregar (${frontHashesErro})`
+                : !frontHashesProntos
+                ? ' · carregando catálogo…'
+                : ''}
+            </div>
+          </>
+        )}
       </div>
 
       {debugAtivo && (
@@ -1081,6 +1333,14 @@ export default function ScanPage() {
                   })}
             </div>
           </div>
+          {modoCaptura === 'frente' && (
+            <div>
+              <div style={{ color: '#94a3b8', marginBottom: 2 }}>Match frente (dHash)</div>
+              <div style={{ fontFamily: 'monospace', color: '#fcd34d' }}>
+                {debugFrontMatch ?? '—'}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
