@@ -88,6 +88,16 @@ const FRONT_SCORE_GAP_MIN = 0.04;
 const FRONT_TICK_MS = 80;
 const FRONT_HISTORY_SIZE = 3;
 const FRONT_CONSENSUS_MIN = 2;
+// Posições de amostragem por tick (offsets em fração do frame). Tolera o
+// usuário fora de centro: por tick, capturamos cada posição e ficamos com a
+// que pontuou melhor.
+const FRONT_OFFSETS: { dx: number; dy: number }[] = [
+  { dx: 0, dy: 0 },
+  { dx: -0.12, dy: 0 },
+  { dx: 0.12, dy: 0 },
+  { dx: 0, dy: -0.12 },
+  { dx: 0, dy: 0.12 },
+];
 
 type ModoScan = 'turbo' | 'legacy';
 type ModoCaptura = 'verso' | 'frente';
@@ -561,7 +571,10 @@ export default function ScanPage() {
   // desalinhado do que o usuário enxerga). Devolve sx, sy, sw, sh pra usar
   // em drawImage subsequente.
   const calcularCropFrente = useCallback(
-    (): { sx: number; sy: number; sw: number; sh: number } | null => {
+    (
+      dx = 0,
+      dy = 0
+    ): { sx: number; sy: number; sw: number; sh: number } | null => {
       if (!videoRef.current) return null;
       const v = videoRef.current;
       const sw = v.videoWidth;
@@ -577,8 +590,10 @@ export default function ScanPage() {
         frameH = vh * 0.78;
         frameW = frameH * FRAME_RATIO_WH;
       }
-      const frameX = (vw - frameW) / 2;
-      const frameY = (vh - frameH) / 2;
+      // dx/dy são frações do tamanho do frame — desloca o "alvo" sem sair
+      // da janela visível. Útil pra amostrar várias posições por tick.
+      const frameX = (vw - frameW) / 2 + dx * frameW;
+      const frameY = (vh - frameH) / 2 + dy * frameH;
 
       const viewportRatio = vw / vh;
       const videoRatio = sw / sh;
@@ -608,12 +623,15 @@ export default function ScanPage() {
   // Captura a região da figurinha em duas resoluções: 17x16 pra dHash e 64x64
   // pra histograma de cor. Reusa o mesmo canvas escondido (redimensiona entre
   // os dois drawImage). Devolve null se vídeo ainda não tem dimensões válidas.
-  const capturarFrente = useCallback((): {
+  const capturarFrente = useCallback((
+    dx = 0,
+    dy = 0
+  ): {
     hash: ImageData;
     cor: ImageData;
   } | null => {
     if (!canvasRef.current || !videoRef.current) return null;
-    const crop = calcularCropFrente();
+    const crop = calcularCropFrente(dx, dy);
     if (!crop) return null;
     const c = canvasRef.current;
     const v = videoRef.current;
@@ -758,14 +776,17 @@ export default function ScanPage() {
       }
       try {
         setEscaneando(true);
-        const cap = capturarFrente();
-        if (!cap) {
-          timeoutId = setTimeout(tickFrente, FRONT_TICK_MS);
-          return;
+        // Amostra várias posições centradas em torno do frame e mantém o de
+        // melhor score. Compensa usuário que não enquadrou perfeito.
+        let ranqueado: MatchResult | null = null;
+        for (const off of FRONT_OFFSETS) {
+          const cap = capturarFrente(off.dx, off.dy);
+          if (!cap) continue;
+          const hash = computeDHashFromImageData(cap.hash);
+          const cor = computeColorHistFromImageData(cap.cor);
+          const r = rankearMatches(hash, cor, payload.items);
+          if (r && (!ranqueado || r.score < ranqueado.score)) ranqueado = r;
         }
-        const hash = computeDHashFromImageData(cap.hash);
-        const cor = computeColorHistFromImageData(cap.cor);
-        const ranqueado = rankearMatches(hash, cor, payload.items);
         setUltimaTentativaFrente(ranqueado);
         if (!ranqueado) {
           if (!cancelado) timeoutId = setTimeout(tickFrente, FRONT_TICK_MS);
