@@ -82,12 +82,7 @@ export type MatchResult = {
   segundoMaisProximo: number;
 };
 
-export function findBestMatch(
-  hash: string,
-  items: FrontHashItem[],
-  maxDistance: number,
-  minGap = 0
-): MatchResult | null {
+export function rankearMatches(hash: string, items: FrontHashItem[]): MatchResult | null {
   let melhorId = '';
   let melhor = Infinity;
   let segundo = Infinity;
@@ -101,7 +96,19 @@ export function findBestMatch(
       segundo = d;
     }
   }
-  if (melhor > maxDistance) return null;
-  if (segundo - melhor < minGap) return null;
+  if (melhor === Infinity) return null;
   return { id: melhorId, distance: melhor, segundoMaisProximo: segundo };
+}
+
+export function findBestMatch(
+  hash: string,
+  items: FrontHashItem[],
+  maxDistance: number,
+  minGap = 0
+): MatchResult | null {
+  const melhor = rankearMatches(hash, items);
+  if (!melhor) return null;
+  if (melhor.distance > maxDistance) return null;
+  if (melhor.segundoMaisProximo - melhor.distance < minGap) return null;
+  return melhor;
 }

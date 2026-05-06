@@ -25,8 +25,9 @@ import { HistoricoModal } from '@/components/historico/HistoricoModal';
 import type { Sticker } from '@/resources/types';
 import {
   computeDHashFromImageData,
-  findBestMatch,
+  rankearMatches,
   type FrontHashesPayload,
+  type MatchResult,
 } from '@/resources/lib/frontHash';
 
 function normalizarCodigo(raw: string): string {
@@ -190,6 +191,7 @@ export default function ScanPage() {
   const [frontHashesProntos, setFrontHashesProntos] = useState(false);
   const [frontHashesErro, setFrontHashesErro] = useState<string | null>(null);
   const [debugFrontMatch, setDebugFrontMatch] = useState<string | null>(null);
+  const [ultimaTentativaFrente, setUltimaTentativaFrente] = useState<MatchResult | null>(null);
 
   useEffect(() => {
     try {
@@ -544,28 +546,63 @@ export default function ScanPage() {
     []
   );
 
-  // Captura central vertical proporção figurinha (~5:7) e devolve já reduzido
-  // para 17x16 — formato esperado pelo dHash. Reusa o canvas escondido já
-  // existente; o tamanho diferente do OCR não é problema (canvas é redimensionado
-  // a cada chamada).
+  // Captura o pedaço do vídeo que corresponde ao retângulo verde visível
+  // (frente da figurinha, proporção 5x6.5 cm). Faz a matemática do object-fit:
+  // cover pra mapear coordenadas viewport → coordenadas do <video> bruto, senão
+  // o crop fica desalinhado do que o usuário vê. Devolve já 17x16 grayscale-ready
+  // pro dHash.
   const capturarFrente = useCallback((): ImageData | null => {
     if (!videoRef.current || !canvasRef.current) return null;
     const v = videoRef.current;
     const c = canvasRef.current;
-    const w = v.videoWidth;
-    const h = v.videoHeight;
-    if (!w || !h) return null;
-    const recH = Math.floor(h * 0.85);
-    const recW = Math.min(Math.floor(recH * (5 / 7)), Math.floor(w * 0.9));
-    const sx = Math.floor((w - recW) / 2);
-    const sy = Math.floor((h - recH) / 2);
+    const sw = v.videoWidth;
+    const sh = v.videoHeight;
+    const vw = v.clientWidth;
+    const vh = v.clientHeight;
+    if (!sw || !sh || !vw || !vh) return null;
+
+    // Frame verde (mantém em sync com o overlay JSX abaixo): 85% da largura
+    // do viewport, altura derivada da proporção real da figurinha (5/6.5).
+    const FRAME_RATIO_WH = 5 / 6.5; // largura / altura
+    let frameW = vw * 0.85;
+    let frameH = frameW / FRAME_RATIO_WH;
+    if (frameH > vh * 0.78) {
+      frameH = vh * 0.78;
+      frameW = frameH * FRAME_RATIO_WH;
+    }
+    const frameX = (vw - frameW) / 2;
+    const frameY = (vh - frameH) / 2;
+
+    // object-fit: cover — escala vídeo pra cobrir todo o viewport, cropando o
+    // eixo "sobrando".
+    const viewportRatio = vw / vh;
+    const videoRatio = sw / sh;
+    let scale: number;
+    let offsetX: number;
+    let offsetY: number;
+    if (videoRatio > viewportRatio) {
+      scale = vh / sh;
+      offsetX = (vw - sw * scale) / 2;
+      offsetY = 0;
+    } else {
+      scale = vw / sw;
+      offsetX = 0;
+      offsetY = (vh - sh * scale) / 2;
+    }
+
+    const sx = Math.max(0, Math.floor((frameX - offsetX) / scale));
+    const sy = Math.max(0, Math.floor((frameY - offsetY) / scale));
+    const sCropW = Math.min(sw - sx, Math.floor(frameW / scale));
+    const sCropH = Math.min(sh - sy, Math.floor(frameH / scale));
+    if (sCropW <= 0 || sCropH <= 0) return null;
+
     c.width = 17;
     c.height = 16;
     const ctx = c.getContext('2d', { willReadFrequently: true });
     if (!ctx) return null;
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(v, sx, sy, recW, recH, 0, 0, 17, 16);
+    ctx.drawImage(v, sx, sy, sCropW, sCropH, 0, 0, 17, 16);
     return ctx.getImageData(0, 0, 17, 16);
   }, []);
 
@@ -693,17 +730,21 @@ export default function ScanPage() {
           return;
         }
         const hash = computeDHashFromImageData(img);
-        const match = findBestMatch(
-          hash,
-          payload.items,
-          FRONT_HASH_MAX_DISTANCE,
-          FRONT_HASH_MIN_GAP
-        );
+        const ranqueado = rankearMatches(hash, payload.items);
+        setUltimaTentativaFrente(ranqueado);
+        const match =
+          ranqueado &&
+          ranqueado.distance <= FRONT_HASH_MAX_DISTANCE &&
+          ranqueado.segundoMaisProximo - ranqueado.distance >= FRONT_HASH_MIN_GAP
+            ? ranqueado
+            : null;
         if (debugAtivo) {
           setDebugFrontMatch(
             match
               ? `${match.id} (d=${match.distance}, 2º=${match.segundoMaisProximo})`
-              : `sem match (mín>${FRONT_HASH_MAX_DISTANCE})`
+              : ranqueado
+              ? `mais perto: ${ranqueado.id} d=${ranqueado.distance} 2º=${ranqueado.segundoMaisProximo} (gates: d<=${FRONT_HASH_MAX_DISTANCE} & gap>=${FRONT_HASH_MIN_GAP})`
+              : '—'
           );
         }
         if (match && !pausadoRef.current) {
@@ -922,10 +963,12 @@ export default function ScanPage() {
         <div
           style={{
             position: 'absolute',
-            left: '25%',
-            top: '12%',
-            width: '50%',
-            height: '76%',
+            left: '50%',
+            top: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: '85%',
+            maxHeight: '78%',
+            aspectRatio: '5 / 6.5',
             border: '2px solid #22c55e',
             borderRadius: 14,
             boxShadow: '0 0 24px rgba(34,197,94,0.4)',
@@ -1009,7 +1052,9 @@ export default function ScanPage() {
             ? 'Lendo…'
             : modoCaptura === 'frente'
             ? frontHashesProntos
-              ? 'Pronto p/ foto'
+              ? ultimaTentativaFrente
+                ? `${ultimaTentativaFrente.id} d=${ultimaTentativaFrente.distance} gap=${ultimaTentativaFrente.segundoMaisProximo - ultimaTentativaFrente.distance}`
+                : 'Pronto p/ foto'
               : 'Carregando…'
             : 'Pronto p/ ler'}
         </div>
