@@ -79,11 +79,16 @@ const MAX_NOTIFICACOES_QUICK = 2;
 // Threshold de Hamming para o dHash 256-bit do scanner de frente. Como as
 // imagens-fonte em /public/countries são de qualidade variável (puxadas da
 // internet, não as masters da Panini), a distância ABSOLUTA mesmo num bom
-// match pode ser alta (60-100). A confiança vem do RANKING — se o jogador
-// certo é o mais próximo com folga clara em relação ao 2º, é match.
-// Distância média esperada entre 2 imagens aleatórias = 128 bits.
-const FRONT_HASH_MAX_DISTANCE = 110;
-const FRONT_HASH_MIN_GAP = 12;
+// match pode ser alta (60-100). A confiança vem do RANKING + VOTO TEMPORAL:
+// vários frames seguidos têm que eleger o mesmo jogador. Distância média
+// esperada entre 2 imagens aleatórias = 128 bits.
+const FRONT_HASH_MAX_DISTANCE = 115;
+const FRONT_HASH_MIN_GAP = 6;
+// Voto temporal: mantemos os últimos N frames e exigimos consenso. Isso
+// dispensa precisão por-frame e filtra brilho/sombra/borrão pontuais.
+const FRONT_TICK_MS = 700;
+const FRONT_HISTORY_SIZE = 5;
+const FRONT_CONSENSUS_MIN = 3;
 
 type ModoScan = 'turbo' | 'legacy';
 type ModoCaptura = 'verso' | 'frente';
@@ -193,6 +198,8 @@ export default function ScanPage() {
   const [frontHashesErro, setFrontHashesErro] = useState<string | null>(null);
   const [debugFrontMatch, setDebugFrontMatch] = useState<string | null>(null);
   const [ultimaTentativaFrente, setUltimaTentativaFrente] = useState<MatchResult | null>(null);
+  const [consensoFrente, setConsensoFrente] = useState<{ id: string; count: number } | null>(null);
+  const historicoFrenteRef = useRef<MatchResult[]>([]);
 
   useEffect(() => {
     try {
@@ -228,6 +235,9 @@ export default function ScanPage() {
 
   const escolherCaptura = useCallback((proximo: ModoCaptura) => {
     setModoCaptura(proximo);
+    historicoFrenteRef.current = [];
+    setConsensoFrente(null);
+    setUltimaTentativaFrente(null);
     try {
       window.localStorage.setItem(SCAN_CAPTURA_KEY, proximo);
     } catch {}
@@ -720,44 +730,76 @@ export default function ScanPage() {
       const v = videoRef.current;
       const payload = frontHashesRef.current;
       if (!v || v.readyState < 2 || pausadoRef.current || !payload) {
-        timeoutId = setTimeout(tickFrente, 500);
+        timeoutId = setTimeout(tickFrente, FRONT_TICK_MS);
         return;
       }
       try {
         setEscaneando(true);
         const img = capturarFrente();
         if (!img) {
-          timeoutId = setTimeout(tickFrente, 500);
+          timeoutId = setTimeout(tickFrente, FRONT_TICK_MS);
           return;
         }
         const hash = computeDHashFromImageData(img);
         const ranqueado = rankearMatches(hash, payload.items);
         setUltimaTentativaFrente(ranqueado);
-        const match =
-          ranqueado &&
-          ranqueado.distance <= FRONT_HASH_MAX_DISTANCE &&
-          ranqueado.segundoMaisProximo - ranqueado.distance >= FRONT_HASH_MIN_GAP
-            ? ranqueado
-            : null;
+        if (!ranqueado) {
+          if (!cancelado) timeoutId = setTimeout(tickFrente, FRONT_TICK_MS);
+          return;
+        }
+
+        // janela deslizante de candidatos pra voto temporal
+        const hist = historicoFrenteRef.current;
+        hist.push(ranqueado);
+        if (hist.length > FRONT_HISTORY_SIZE) hist.shift();
+
+        // conta ocorrências de cada id na janela
+        const buckets = new Map<string, MatchResult[]>();
+        for (const r of hist) {
+          const list = buckets.get(r.id);
+          if (list) list.push(r);
+          else buckets.set(r.id, [r]);
+        }
+        let topId = '';
+        let topCount = 0;
+        let topEntries: MatchResult[] = [];
+        buckets.forEach((entries, id) => {
+          if (entries.length > topCount) {
+            topId = id;
+            topCount = entries.length;
+            topEntries = entries;
+          }
+        });
+        setConsensoFrente({ id: topId, count: topCount });
+
         if (debugAtivo) {
           setDebugFrontMatch(
-            match
-              ? `${match.id} (d=${match.distance}, 2º=${match.segundoMaisProximo})`
-              : ranqueado
-              ? `mais perto: ${ranqueado.id} d=${ranqueado.distance} 2º=${ranqueado.segundoMaisProximo} (gates: d<=${FRONT_HASH_MAX_DISTANCE} & gap>=${FRONT_HASH_MIN_GAP})`
-              : '—'
+            `top=${topId} ${topCount}/${hist.length} | última: ${ranqueado.id} d=${ranqueado.distance} gap=${ranqueado.segundoMaisProximo - ranqueado.distance}`
           );
         }
-        if (match && !pausadoRef.current) {
-          const sticker = figurinhaPorId(match.id);
-          if (sticker) handlerStickerDetectadoRef.current(sticker);
+
+        if (topCount >= FRONT_CONSENSUS_MIN && !pausadoRef.current) {
+          // pega o melhor entry do consenso e checa qualidade mínima
+          const melhorDoConsenso = topEntries.reduce((a, b) =>
+            a.distance < b.distance ? a : b
+          );
+          const gap = melhorDoConsenso.segundoMaisProximo - melhorDoConsenso.distance;
+          if (
+            melhorDoConsenso.distance <= FRONT_HASH_MAX_DISTANCE &&
+            gap >= FRONT_HASH_MIN_GAP
+          ) {
+            historicoFrenteRef.current = [];
+            setConsensoFrente(null);
+            const sticker = figurinhaPorId(topId);
+            if (sticker) handlerStickerDetectadoRef.current(sticker);
+          }
         }
       } catch {
         // ignora erro pontual e segue
       } finally {
         setEscaneando(false);
       }
-      if (!cancelado) timeoutId = setTimeout(tickFrente, 500);
+      if (!cancelado) timeoutId = setTimeout(tickFrente, FRONT_TICK_MS);
     };
 
     loopAtivoRef.current = true;
@@ -1051,13 +1093,14 @@ export default function ScanPage() {
           } else {
             const t = ultimaTentativaFrente;
             const gap = t.segundoMaisProximo - t.distance;
-            const passaDist = t.distance <= FRONT_HASH_MAX_DISTANCE;
-            const passaGap = gap >= FRONT_HASH_MIN_GAP;
-            if (passaDist && passaGap) {
+            const consensoCount = consensoFrente?.id === t.id ? consensoFrente.count : 0;
+            const passaConsenso = consensoCount >= FRONT_CONSENSUS_MIN;
+            const passaQualidade = t.distance <= FRONT_HASH_MAX_DISTANCE && gap >= FRONT_HASH_MIN_GAP;
+            if (passaConsenso && passaQualidade) {
               corBorda = '#22c55e';
               corTexto = '#22c55e';
               corIcone = '#22c55e';
-            } else if (passaDist || passaGap) {
+            } else if (passaConsenso || passaQualidade) {
               corBorda = '#fbbf24';
               corTexto = '#fbbf24';
               corIcone = '#fbbf24';
@@ -1066,7 +1109,8 @@ export default function ScanPage() {
               corTexto = '#9aa6c9';
               corIcone = '#9aa6c9';
             }
-            conteudo = `${t.id} d=${t.distance} gap=${gap}`;
+            const progresso = consensoCount > 0 ? ` ${consensoCount}/${FRONT_HISTORY_SIZE}` : '';
+            conteudo = `${t.id} d=${t.distance} gap=${gap}${progresso}`;
           }
 
           return (
