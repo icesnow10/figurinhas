@@ -24,11 +24,12 @@ import { usePerguntaMcd } from '@/resources/hooks/usePerguntaMcd';
 import { HistoricoModal } from '@/components/historico/HistoricoModal';
 import type { Sticker } from '@/resources/types';
 import {
+  bhattacharyyaHex,
   computeColorHistFromImageData,
   computeDHashFromImageData,
-  rankearTopK,
+  hammingHex,
   type FrontHashesPayload,
-  type MatchResult,
+  type FrontHashItem,
 } from '@/resources/lib/frontHash';
 
 function normalizarCodigo(raw: string): string {
@@ -77,13 +78,14 @@ const SCAN_QUICK_KEY = 'figurinhas:scan:quickMode';
 const SCAN_CAPTURA_KEY = 'figurinhas:scan:captura';
 const QUICK_DURATION_MS = 10_000;
 const MAX_NOTIFICACOES_QUICK = 2;
-// Estratégia: sempre mostra os top-3 candidatos como botões clicáveis. Auto-
-// fire SÓ pra matches muito limpos (score baixo + gap alto), pra evitar falso
-// positivo. Pra qualquer caso ambíguo, o usuário toca no candidato certo.
+// Estratégia pairwise: o usuário escolhe primeiro qual figurinha quer scanear,
+// daí o loop só compara a câmera com ESSA fonte (1-to-1, não 1-to-N). Sem
+// risco de confundir com jogadores parecidos. Score < 0.35 com fonte correta
+// indica match confiável.
 const FRONT_TICK_MS = 120;
-const FRONT_TOP_K = 3;
-const FRONT_AUTO_SCORE_MAX = 0.22;
-const FRONT_AUTO_GAP_MIN = 0.08;
+const FRONT_PAIRWISE_AUTO_THRESHOLD = 0.32;
+const FRONT_PAIRWISE_HISTORY = 4;
+const FRONT_PAIRWISE_CONSENSO_MIN = 3;
 // Amostragem multi-escala + multi-posição por tick. Escala compensa o usuário
 // que segura a figurinha longe (sticker ocupa pouco do viewport — em alguma
 // escala menor o crop fica preenchido); offsets compensam fora-de-centro.
@@ -208,7 +210,10 @@ export default function ScanPage() {
   const frontHashesLoadingRef = useRef(false);
   const [frontHashesProntos, setFrontHashesProntos] = useState(false);
   const [frontHashesErro, setFrontHashesErro] = useState<string | null>(null);
-  const [topKFrente, setTopKFrente] = useState<MatchResult[]>([]);
+  const [figurinhaAlvo, setFigurinhaAlvo] = useState<Sticker | null>(null);
+  const [pickerAberto, setPickerAberto] = useState(false);
+  const [scoreAlvo, setScoreAlvo] = useState<number | null>(null);
+  const historicoScoreAlvoRef = useRef<number[]>([]);
 
   useEffect(() => {
     try {
@@ -244,10 +249,28 @@ export default function ScanPage() {
 
   const escolherCaptura = useCallback((proximo: ModoCaptura) => {
     setModoCaptura(proximo);
-    setTopKFrente([]);
+    setFigurinhaAlvo(null);
+    setScoreAlvo(null);
+    historicoScoreAlvoRef.current = [];
     try {
       window.localStorage.setItem(SCAN_CAPTURA_KEY, proximo);
     } catch {}
+  }, []);
+
+  const escolherAlvo = useCallback((sticker: Sticker | null) => {
+    setFigurinhaAlvo(sticker);
+    setScoreAlvo(null);
+    historicoScoreAlvoRef.current = [];
+    setPickerAberto(false);
+  }, []);
+
+  // Match em modo Foto SEMPRE abre o modal pra confirmar (ignora Quick Mode).
+  // É um modo "verificação", então a confirmação manual final faz sentido.
+  const abrirConfirmacaoFrente = useCallback((sticker: Sticker) => {
+    pausadoRef.current = true;
+    setCodigoLido(sticker.codigo);
+    setEdicaoManual(sticker.codigo);
+    setModalAberto(true);
   }, []);
 
   useEffect(() => {
@@ -777,60 +800,54 @@ export default function ScanPage() {
         timeoutId = setTimeout(tickFrente, FRONT_TICK_MS);
         return;
       }
+      // Pairwise: precisa de alvo escolhido. Sem alvo, não scaneia.
+      if (!figurinhaAlvo) {
+        timeoutId = setTimeout(tickFrente, FRONT_TICK_MS);
+        return;
+      }
+      const itemAlvo: FrontHashItem | undefined = payload.items.find(
+        (it) => it.id === figurinhaAlvo.id
+      );
+      if (!itemAlvo) {
+        timeoutId = setTimeout(tickFrente, FRONT_TICK_MS);
+        return;
+      }
       try {
         setEscaneando(true);
-        // Pra cada posição, calcula top-K. Depois agrega: o id que ganha
-        // mais "melhor de cada posição" é o candidato auto-fire (se for
-        // limpo o suficiente). Pra UI, o top-3 vem do agregado de TODAS as
-        // posições — colapsa duplicatas pelo melhor score.
-        const todosPorId = new Map<string, MatchResult>();
-        const votosPorId = new Map<string, number>();
+        // Pra cada amostra (multi-escala/posição), computa só o score pairwise
+        // contra o alvo. Pega o MELHOR (= menor score) entre as amostras.
+        let melhorScore = Infinity;
         for (const samp of FRONT_SAMPLES) {
           const cap = capturarFrente(samp.dx, samp.dy, samp.scale);
           if (!cap) continue;
           const hash = computeDHashFromImageData(cap.hash);
           const cor = computeColorHistFromImageData(cap.cor);
-          const tops = rankearTopK(hash, cor, payload.items, FRONT_TOP_K);
-          if (!tops.length) continue;
-          // voto desta posição = 1º colocado dela
-          votosPorId.set(tops[0].id, (votosPorId.get(tops[0].id) ?? 0) + 1);
-          // mescla candidatos por id, preservando o melhor score visto
-          for (const r of tops) {
-            const existente = todosPorId.get(r.id);
-            if (!existente || r.score < existente.score) todosPorId.set(r.id, r);
-          }
+          const hd = hammingHex(hash, itemAlvo.h);
+          const cd = itemAlvo.c ? bhattacharyyaHex(cor, itemAlvo.c) : 0.5;
+          const score = 0.6 * (hd / 256) + 0.4 * cd;
+          if (score < melhorScore) melhorScore = score;
         }
-
-        if (todosPorId.size === 0) {
+        if (!isFinite(melhorScore)) {
           if (!cancelado) timeoutId = setTimeout(tickFrente, FRONT_TICK_MS);
           return;
         }
 
-        // top-K consolidado pra UI
-        const top = Array.from(todosPorId.values())
-          .sort((a, b) => a.score - b.score)
-          .slice(0, FRONT_TOP_K);
-        setTopKFrente(top);
+        // Suaviza com janela: pega o MELHOR dos últimos N
+        const hist = historicoScoreAlvoRef.current;
+        hist.push(melhorScore);
+        if (hist.length > FRONT_PAIRWISE_HISTORY) hist.shift();
+        const melhorJanela = Math.min(...hist);
+        setScoreAlvo(melhorJanela);
 
-        // Auto-fire só se MAIORIA das posições concordou no mesmo id E o
-        // melhor score dele passa nos gates limpos.
-        let idVencedor = '';
-        let votosVencedor = 0;
-        votosPorId.forEach((v, id) => {
-          if (v > votosVencedor) {
-            votosVencedor = v;
-            idVencedor = id;
-          }
-        });
-        if (votosVencedor >= FRONT_OFFSET_VOTO_MIN && !pausadoRef.current) {
-          const m = todosPorId.get(idVencedor);
-          if (m) {
-            const gap = m.scoreSegundoMaisProximo - m.score;
-            if (m.score <= FRONT_AUTO_SCORE_MAX && gap >= FRONT_AUTO_GAP_MIN) {
-              const sticker = figurinhaPorId(idVencedor);
-              if (sticker) handlerStickerDetectadoRef.current(sticker);
-            }
-          }
+        // Auto-fire: precisa de N frames CONSECUTIVOS abaixo do threshold
+        const abaixoDoLimite = hist.filter((s) => s <= FRONT_PAIRWISE_AUTO_THRESHOLD).length;
+        if (
+          abaixoDoLimite >= FRONT_PAIRWISE_CONSENSO_MIN &&
+          melhorJanela <= FRONT_PAIRWISE_AUTO_THRESHOLD &&
+          !pausadoRef.current
+        ) {
+          historicoScoreAlvoRef.current = [];
+          abrirConfirmacaoFrente(figurinhaAlvo);
         }
       } catch {
         // ignora erro pontual e segue
@@ -849,7 +866,7 @@ export default function ScanPage() {
       loopAtivoRef.current = false;
       if (timeoutId) clearTimeout(timeoutId);
     };
-  }, [capturarFrame, capturarFrente, debugAtivo, turboAtivo, modoCaptura, frontHashesProntos]);
+  }, [capturarFrame, capturarFrente, debugAtivo, turboAtivo, modoCaptura, frontHashesProntos, figurinhaAlvo, abrirConfirmacaoFrente]);
 
   const fig = buscarFigurinha(normalizarCodigo(edicaoManual));
   const origemAtual = quickOrigemRef.current;
@@ -1126,17 +1143,19 @@ export default function ScanPage() {
             conteudo = 'Pronto p/ ler';
           } else if (!frontHashesProntos) {
             conteudo = 'Carregando…';
-          } else if (topKFrente.length === 0) {
-            conteudo = 'Pronto p/ foto';
+          } else if (!figurinhaAlvo) {
+            conteudo = 'Escolha figurinha';
+          } else if (scoreAlvo == null) {
+            conteudo = `Buscando ${figurinhaAlvo.codigo}…`;
           } else {
-            const t = topKFrente[0];
-            const gap = t.scoreSegundoMaisProximo - t.score;
-            if (t.score <= FRONT_AUTO_SCORE_MAX && gap >= FRONT_AUTO_GAP_MIN) {
+            const passou = scoreAlvo <= FRONT_PAIRWISE_AUTO_THRESHOLD;
+            if (passou) {
               corBorda = '#22c55e';
               corTexto = '#22c55e';
               corIcone = '#22c55e';
             }
-            conteudo = `${t.id} s=${t.score.toFixed(2)}`;
+            const sim = Math.max(0, 1 - scoreAlvo) * 100;
+            conteudo = `${figurinhaAlvo.codigo} ${sim.toFixed(0)}%`;
           }
 
           return (
@@ -1367,7 +1386,9 @@ export default function ScanPage() {
                 textOverflow: 'ellipsis',
               }}
             >
-              <b style={{ color: '#22c55e' }}>Encoste a figurinha</b> na moldura
+              {figurinhaAlvo
+                ? <>Aponte pra <b style={{ color: '#22c55e' }}>{figurinhaAlvo.codigo}</b></>
+                : <><b style={{ color: '#22c55e' }}>Escolha</b> a figurinha que vai scanear</>}
             </div>
             <div
               style={{
@@ -1392,7 +1413,7 @@ export default function ScanPage() {
         )}
       </div>
 
-      {/* Painel de top-3 candidatos (modo Foto): tap-to-confirm. */}
+      {/* Painel pairwise (modo Foto): mostra alvo escolhido + similaridade live. */}
       {modoCaptura === 'frente' && frontHashesProntos && (
         <div
           style={{
@@ -1402,97 +1423,224 @@ export default function ScanPage() {
             bottom: 90,
             display: 'flex',
             justifyContent: 'center',
-            gap: 10,
-            pointerEvents: 'none',
             zIndex: 6,
           }}
         >
-          {topKFrente.length === 0 ? (
-            <div
+          {!figurinhaAlvo ? (
+            <button
+              onClick={() => setPickerAberto(true)}
               style={{
-                color: '#9aa6c9',
-                fontSize: 12,
-                background: 'rgba(0,0,0,0.55)',
-                padding: '6px 12px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '10px 18px',
                 borderRadius: 999,
-                pointerEvents: 'auto',
+                background: '#22c55e',
+                color: '#0a1230',
+                border: 'none',
+                fontWeight: 800,
+                fontSize: 14,
+                cursor: 'pointer',
+                boxShadow: '0 4px 16px rgba(34,197,94,0.4)',
               }}
             >
-              Aponte pra figurinha…
-            </div>
+              <ImageIcon size={18} />
+              Escolher figurinha p/ scanear
+            </button>
           ) : (
-            topKFrente.map((cand, idx) => {
-              const fig = figurinhaPorId(cand.id);
-              if (!fig) return null;
-              const ehTop = idx === 0;
-              const gap = cand.scoreSegundoMaisProximo - cand.score;
-              const limpo = ehTop && cand.score <= FRONT_AUTO_SCORE_MAX && gap >= FRONT_AUTO_GAP_MIN;
+            (() => {
+              const sim = scoreAlvo == null ? null : Math.max(0, 1 - scoreAlvo) * 100;
+              const passou = scoreAlvo != null && scoreAlvo <= FRONT_PAIRWISE_AUTO_THRESHOLD;
+              const corBarra = passou ? '#22c55e' : sim != null && sim >= 50 ? '#fbbf24' : '#9aa6c9';
               return (
-                <button
-                  key={cand.id}
-                  onClick={() => {
-                    pausadoRef.current = true;
-                    handlerStickerDetectadoRef.current(fig);
-                  }}
+                <div
                   style={{
                     display: 'flex',
-                    flexDirection: 'column',
                     alignItems: 'center',
-                    gap: 4,
-                    padding: 6,
-                    borderRadius: 12,
-                    background: 'rgba(10,18,48,0.85)',
-                    border: limpo
-                      ? '2px solid #22c55e'
-                      : ehTop
-                      ? '2px solid #fbbf24'
-                      : '1px solid rgba(255,255,255,0.15)',
-                    cursor: 'pointer',
-                    pointerEvents: 'auto',
-                    backdropFilter: 'blur(6px)',
-                    minWidth: 78,
+                    gap: 12,
+                    padding: 10,
+                    borderRadius: 14,
+                    background: 'rgba(10,18,48,0.92)',
+                    border: passou ? '2px solid #22c55e' : '1px solid rgba(255,255,255,0.15)',
+                    backdropFilter: 'blur(8px)',
+                    width: '100%',
+                    maxWidth: 420,
                   }}
                 >
-                  <div
+                  <img
+                    src={figurinhaAlvo.imagem}
+                    alt={figurinhaAlvo.nome}
                     style={{
-                      width: 64,
-                      height: 84,
+                      width: 56,
+                      height: 74,
+                      objectFit: 'cover',
                       borderRadius: 6,
-                      overflow: 'hidden',
-                      background: '#1a2236',
+                      border: '2px solid ' + corBarra,
                     }}
-                  >
-                    <img
-                      src={fig.imagem}
-                      alt={fig.nome}
-                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                    />
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ color: '#fff', fontSize: 12, fontWeight: 800 }}>
+                      {figurinhaAlvo.codigo} · {figurinhaAlvo.nome}
+                    </div>
+                    <div
+                      style={{
+                        marginTop: 6,
+                        height: 8,
+                        background: 'rgba(255,255,255,0.08)',
+                        borderRadius: 999,
+                        overflow: 'hidden',
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: `${sim ?? 0}%`,
+                          height: '100%',
+                          background: corBarra,
+                          transition: 'width 200ms ease',
+                        }}
+                      />
+                    </div>
+                    <div
+                      style={{
+                        marginTop: 4,
+                        color: corBarra,
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                        fontWeight: 700,
+                      }}
+                    >
+                      {sim == null ? 'aguardando…' : `${sim.toFixed(0)}% parecido`}
+                      {passou ? ' · MATCH' : ''}
+                    </div>
                   </div>
-                  <div
-                    style={{
-                      color: '#fff',
-                      fontWeight: 800,
-                      fontSize: 11,
-                      letterSpacing: 0.4,
-                    }}
-                  >
-                    {fig.codigo}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <button
+                      onClick={() => abrirConfirmacaoFrente(figurinhaAlvo)}
+                      style={{
+                        padding: '6px 10px',
+                        borderRadius: 8,
+                        background: '#22c55e',
+                        color: '#0a1230',
+                        border: 'none',
+                        fontSize: 11,
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Confirmar
+                    </button>
+                    <button
+                      onClick={() => escolherAlvo(null)}
+                      style={{
+                        padding: '6px 10px',
+                        borderRadius: 8,
+                        background: 'rgba(255,255,255,0.08)',
+                        color: '#9aa6c9',
+                        border: '1px solid rgba(255,255,255,0.1)',
+                        fontSize: 11,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Trocar
+                    </button>
                   </div>
-                  <div
-                    style={{
-                      color: limpo ? '#22c55e' : '#9aa6c9',
-                      fontSize: 10,
-                      fontFamily: 'monospace',
-                    }}
-                  >
-                    s={cand.score.toFixed(2)}
-                  </div>
-                </button>
+                </div>
               );
-            })
+            })()
           )}
         </div>
       )}
+
+      {/* Picker: grid de figurinhas pra escolher como alvo do pairwise. */}
+      <Modal
+        open={pickerAberto}
+        onCancel={() => setPickerAberto(false)}
+        footer={null}
+        title="Escolha a figurinha"
+        width={520}
+        styles={{
+          content: { background: '#0a1230', border: '1px solid #2a3654' },
+          header: { background: '#0a1230', borderBottom: '1px solid #2a3654' },
+        }}
+      >
+        {(() => {
+          const ids = (frontHashesRef.current?.items ?? []).map((it) => it.id);
+          const figs = ids
+            .map((id) => figurinhaPorId(id))
+            .filter((f): f is Sticker => !!f);
+          // Agrupa por prefixo de país (3 primeiras letras do código)
+          const grupos = new Map<string, Sticker[]>();
+          for (const f of figs) {
+            const pais = f.codigo.slice(0, 3);
+            const lista = grupos.get(pais);
+            if (lista) lista.push(f);
+            else grupos.set(pais, [f]);
+          }
+          const NOMES_PAIS: Record<string, string> = {
+            BRA: 'Brasil',
+            ALG: 'Argélia',
+          };
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxHeight: '60vh', overflowY: 'auto' }}>
+              {Array.from(grupos.entries()).map(([pais, lista]) => (
+                <div key={pais}>
+                  <div
+                    style={{
+                      color: '#fbbf24',
+                      fontSize: 12,
+                      fontWeight: 800,
+                      letterSpacing: 0.5,
+                      marginBottom: 8,
+                    }}
+                  >
+                    {(NOMES_PAIS[pais] ?? pais).toUpperCase()}
+                  </div>
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fill, minmax(72px, 1fr))',
+                      gap: 8,
+                    }}
+                  >
+                    {lista.map((f) => (
+                      <button
+                        key={f.id}
+                        onClick={() => escolherAlvo(f)}
+                        style={{
+                          padding: 4,
+                          borderRadius: 8,
+                          background: 'rgba(255,255,255,0.04)',
+                          border: '1px solid rgba(255,255,255,0.08)',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: 'center',
+                          gap: 2,
+                        }}
+                      >
+                        <img
+                          src={f.imagem}
+                          alt={f.nome}
+                          style={{
+                            width: '100%',
+                            aspectRatio: '5 / 6.5',
+                            objectFit: 'cover',
+                            borderRadius: 4,
+                          }}
+                        />
+                        <span style={{ color: '#fff', fontSize: 10, fontWeight: 700 }}>
+                          {f.codigo}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
+      </Modal>
 
       {debugAtivo && (
         <div
