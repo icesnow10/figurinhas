@@ -67,19 +67,26 @@ function cropParams(meta, v) {
   };
 }
 
+// dHash 33x32 = 32 colunas × 32 linhas = 1024 bits = 128 bytes = 256 hex chars
+// Anteriormente era 17x16 = 256 bits — pouco pra discriminar feições faciais
+// dentro de um time (cores idênticas entre 20 jogadores).
+const DHASH_W = 33;
+const DHASH_H = 32;
+const DHASH_BITS = (DHASH_W - 1) * DHASH_H; // 32 × 32 = 1024
+const DHASH_BYTES = DHASH_BITS / 8;
 async function dHashHexVariante(arquivo, meta, v) {
   const raw = await sharp(arquivo)
     .extract(cropParams(meta, v))
-    .resize(17, 16, { fit: 'fill' })
+    .resize(DHASH_W, DHASH_H, { fit: 'fill' })
     .grayscale()
     .raw()
     .toBuffer();
-  const bits = Buffer.alloc(32);
+  const bits = Buffer.alloc(DHASH_BYTES);
   let bitIdx = 0;
-  for (let row = 0; row < 16; row++) {
-    for (let col = 0; col < 16; col++) {
-      const left = raw[row * 17 + col];
-      const right = raw[row * 17 + col + 1];
+  for (let row = 0; row < DHASH_H; row++) {
+    for (let col = 0; col < DHASH_W - 1; col++) {
+      const left = raw[row * DHASH_W + col];
+      const right = raw[row * DHASH_W + col + 1];
       if (left < right) {
         bits[bitIdx >> 3] |= 1 << (bitIdx & 7);
       }
@@ -172,7 +179,7 @@ async function colorHistHexVariante(arquivo, meta, v) {
     version: 3,
     generatedAt: new Date().toISOString(),
     filtro: FILTRO_PREFIXOS.join(','),
-    algorithm: 'dHash-17x16-256bit + HS-histogram-12x6-sqrt-uint8',
+    algorithm: 'dHash-33x32-1024bit + HS-histogram-12x6-sqrt-uint8',
     variantes: VARIANTES.map((v) => v.name),
     items,
   };

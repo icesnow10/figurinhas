@@ -39,24 +39,34 @@ const POPCOUNT = (() => {
 
 // ---------- dHash ----------
 
+// 33x32 = 32 colunas × 32 linhas = 1024 bits = 128 bytes. Mais resolução pra
+// discriminar feições faciais (vs 17x16 anterior).
+export const DHASH_W = 33;
+export const DHASH_H = 32;
+const DHASH_TOTAL = DHASH_W * DHASH_H;
+const DHASH_BITS = (DHASH_W - 1) * DHASH_H;
+const DHASH_BYTES = DHASH_BITS / 8;
+
 export function computeDHashFromImageData(img: ImageData): string {
-  if (img.width !== 17 || img.height !== 16) {
-    throw new Error(`computeDHashFromImageData: esperado 17x16, recebido ${img.width}x${img.height}`);
+  if (img.width !== DHASH_W || img.height !== DHASH_H) {
+    throw new Error(
+      `computeDHashFromImageData: esperado ${DHASH_W}x${DHASH_H}, recebido ${img.width}x${img.height}`
+    );
   }
   const data = img.data;
-  const gray = new Uint8Array(17 * 16);
-  for (let i = 0; i < 17 * 16; i++) {
+  const gray = new Uint8Array(DHASH_TOTAL);
+  for (let i = 0; i < DHASH_TOTAL; i++) {
     const r = data[i * 4];
     const g = data[i * 4 + 1];
     const b = data[i * 4 + 2];
     gray[i] = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
   }
-  const bits = new Uint8Array(32);
+  const bits = new Uint8Array(DHASH_BYTES);
   let bitIdx = 0;
-  for (let row = 0; row < 16; row++) {
-    for (let col = 0; col < 16; col++) {
-      const left = gray[row * 17 + col];
-      const right = gray[row * 17 + col + 1];
+  for (let row = 0; row < DHASH_H; row++) {
+    for (let col = 0; col < DHASH_W - 1; col++) {
+      const left = gray[row * DHASH_W + col];
+      const right = gray[row * DHASH_W + col + 1];
       if (left < right) {
         bits[bitIdx >> 3] |= 1 << (bitIdx & 7);
       }
@@ -167,7 +177,9 @@ export type RankConfig = {
   colorWeight: number;
 };
 
-const DEFAULT_RANK: RankConfig = { hashWeight: 0.6, colorWeight: 0.4 };
+// Hash domina: cor é uniforme dentro de um time (ciano+amarelo+verde igual
+// pros 20 brasileiros), então não discrimina. Hash carrega a decisão.
+const DEFAULT_RANK: RankConfig = { hashWeight: 0.85, colorWeight: 0.15 };
 
 // Para um item (que pode ter múltiplas variantes), devolve o melhor score
 // pairwise contra a câmera. Cada variante é uma "âncora" diferente — a mais
@@ -189,7 +201,7 @@ function melhorScoreParaItem(
   for (const v of variantes) {
     const hd = hammingHex(hashHex, v.h);
     const cd = colorHex && v.c ? bhattacharyyaHex(colorHex, v.c) : 0.5;
-    const score = config.hashWeight * (hd / 256) + config.colorWeight * cd;
+    const score = config.hashWeight * (hd / DHASH_BITS) + config.colorWeight * cd;
     if (!melhor || score < melhor.score) melhor = { hd, cd, score };
   }
   return melhor;

@@ -646,10 +646,10 @@ export default function ScanPage() {
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
 
-    c.width = 17;
-    c.height = 16;
-    ctx.drawImage(v, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, 17, 16);
-    const hash = ctx.getImageData(0, 0, 17, 16);
+    c.width = 33;
+    c.height = 32;
+    ctx.drawImage(v, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, 33, 32);
+    const hash = ctx.getImageData(0, 0, 33, 32);
 
     // 32x32 = 1024 amostras, 4x mais rápido que 64x64. Histograma normalizado
     // continua comparável com a fonte gerada offline (Bhattacharyya invariante
