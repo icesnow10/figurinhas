@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, Input, Button, Switch, message, notification, Progress } from 'antd';
 import {
   RotateCw,
@@ -69,6 +69,74 @@ function buscarFigurinha(codigo: string): Sticker | undefined {
   return FIGURINHAS.find((f) => f.codigo.toUpperCase() === codigo);
 }
 
+// ---------- Helpers OCR do banner do nome (modo Foto) ----------
+
+function normalizarNome(s: string): string {
+  return s
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '') // strip acentos combinados
+    .toUpperCase()
+    .replace(/[^A-Z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function levenshtein(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  const prev = new Array<number>(n + 1);
+  const curr = new Array<number>(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+      curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+    }
+    for (let j = 0; j <= n; j++) prev[j] = curr[j];
+  }
+  return prev[n];
+}
+
+type OCRMatch = { player: Sticker; confidence: number };
+
+// Confidence weighted by word length (sobrenomes longos pesam mais que "DA"/"DO").
+function matchPlayerByOCR(ocrText: string, players: Sticker[]): OCRMatch | null {
+  const ocrWords = normalizarNome(ocrText)
+    .split(' ')
+    .filter((w) => w.length >= 3);
+  if (!ocrWords.length || !players.length) return null;
+
+  let melhor: OCRMatch | null = null;
+  for (const p of players) {
+    const nameWords = normalizarNome(p.nome)
+      .split(' ')
+      .filter((w) => w.length >= 3);
+    if (!nameWords.length) continue;
+
+    let total = 0;
+    let peso = 0;
+    for (const nw of nameWords) {
+      const w = nw.length;
+      peso += w;
+      let melhorSim = 0;
+      for (const ow of ocrWords) {
+        const dist = levenshtein(nw, ow);
+        const sim = 1 - dist / Math.max(nw.length, ow.length);
+        if (sim > melhorSim) melhorSim = sim;
+      }
+      total += melhorSim * w;
+    }
+    const conf = total / peso;
+    if (!melhor || conf > melhor.confidence) {
+      melhor = { player: p, confidence: conf };
+    }
+  }
+  return melhor;
+}
+
 const CAMERA_FACING_KEY = 'figurinhas:scan:facingMode';
 const SCAN_DEBUG_KEY = 'figurinhas:scan:debug';
 const SCAN_TURBO_KEY = 'figurinhas:scan:turbo'; // legado, migrado para SCAN_MODE_KEY
@@ -77,16 +145,12 @@ const SCAN_QUICK_KEY = 'figurinhas:scan:quickMode';
 const SCAN_CAPTURA_KEY = 'figurinhas:scan:captura';
 const QUICK_DURATION_MS = 10_000;
 const MAX_NOTIFICACOES_QUICK = 2;
-// Discovery (1-to-N): igual ao OCR — câmera identifica sozinha qual figurinha
-// é, e dispara o modal de confirmação. Pra ser rápido E confiável:
-//   - 8 amostras por tick (escalas + posições) com voto majoritário forte (6/8)
-//   - Score absoluto baixo + gap claro até o 2º
-//   - 1 tick basta pra disparar (já que a votação intra-tick é forte)
-// Compute por tick: ~10ms (8 amostras × 20 candidatos × hash+cor).
-const FRONT_TICK_MS = 80;
-const FRONT_AUTO_SCORE_MAX = 0.30;
-const FRONT_AUTO_GAP_MIN = 0.05;
-const FRONT_TICK_VOTO_MIN = 6; // 6 das 8 amostras no mesmo id (75% intra-tick)
+// Discovery via OCR do banner do nome: cropa a faixa inferior da figurinha
+// (banner vermelho com nome do jogador), passa pelo Tesseract e faz fuzzy
+// match contra os nomes em figurinhas.ts. Confiabilidade muito maior que
+// hash visual pois cada figurinha tem nome único impresso grande.
+const FRONT_TICK_MS = 500;
+const FRONT_OCR_AUTO_CONFIDENCE = 0.7; // confidence p/ disparar match auto
 // Amostragem multi-escala + multi-posição por tick. Escala compensa o usuário
 // que segura a figurinha longe (sticker ocupa pouco do viewport — em alguma
 // escala menor o crop fica preenchido); offsets compensam fora-de-centro.
@@ -212,6 +276,7 @@ export default function ScanPage() {
   const [frontHashesProntos, setFrontHashesProntos] = useState(false);
   const [frontHashesErro, setFrontHashesErro] = useState<string | null>(null);
   const [ultimoCandidatoFrente, setUltimoCandidatoFrente] = useState<MatchResult | null>(null);
+  const [ocrFrente, setOcrFrente] = useState<{ text: string; match: OCRMatch | null } | null>(null);
 
   useEffect(() => {
     try {
@@ -664,6 +729,86 @@ export default function ScanPage() {
     return { hash, cor };
   }, [calcularCropFrente]);
 
+  // Cropa só a faixa inferior da figurinha (banner com nome do jogador) e
+  // pré-processa pro OCR: upscale + grayscale + alto contraste. Retorna canvas.
+  const capturarBanner = useCallback((): HTMLCanvasElement | null => {
+    if (!videoRef.current || !canvasRef.current) return null;
+    const v = videoRef.current;
+    const c = canvasRef.current;
+    const sw = v.videoWidth;
+    const sh = v.videoHeight;
+    const vw = v.clientWidth;
+    const vh = v.clientHeight;
+    if (!sw || !sh || !vw || !vh) return null;
+
+    const FRAME_RATIO_WH = 5 / 6.5;
+    let frameW = vw * 0.7;
+    let frameH = frameW / FRAME_RATIO_WH;
+    if (frameH > vh * 0.7) {
+      frameH = vh * 0.7;
+      frameW = frameH * FRAME_RATIO_WH;
+    }
+    const frameX = (vw - frameW) / 2;
+    const frameY = (vh - frameH) / 2;
+
+    // Banner = ~30% inferior, com folga horizontal pra não cortar borda
+    const bannerYStart = frameY + frameH * 0.65;
+    const bannerH = frameH * 0.32;
+    const bannerW = frameW * 0.85;
+    const bannerX = frameX + (frameW - bannerW) / 2;
+
+    const viewportRatio = vw / vh;
+    const videoRatio = sw / sh;
+    let coverScale: number;
+    let offsetX: number;
+    let offsetY: number;
+    if (videoRatio > viewportRatio) {
+      coverScale = vh / sh;
+      offsetX = (vw - sw * coverScale) / 2;
+      offsetY = 0;
+    } else {
+      coverScale = vw / sw;
+      offsetX = 0;
+      offsetY = (vh - sh * coverScale) / 2;
+    }
+
+    const sx = Math.max(0, Math.floor((bannerX - offsetX) / coverScale));
+    const sy = Math.max(0, Math.floor((bannerYStart - offsetY) / coverScale));
+    const sCropW = Math.min(sw - sx, Math.floor(bannerW / coverScale));
+    const sCropH = Math.min(sh - sy, Math.floor(bannerH / coverScale));
+    if (sCropW <= 0 || sCropH <= 0) return null;
+
+    // Upscale pra largura ~600px (densidade boa pro Tesseract).
+    const TARGET_W = 600;
+    const TARGET_H = Math.max(1, Math.round((TARGET_W * sCropH) / sCropW));
+    c.width = TARGET_W;
+    c.height = TARGET_H;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(v, sx, sy, sCropW, sCropH, 0, 0, TARGET_W, TARGET_H);
+
+    // Grayscale + boost de contraste pra texto branco em fundo vermelho
+    try {
+      const img = ctx.getImageData(0, 0, TARGET_W, TARGET_H);
+      const d = img.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        const enhanced = Math.max(0, Math.min(255, (g - 128) * 2.0 + 128));
+        d[i] = d[i + 1] = d[i + 2] = enhanced;
+      }
+      ctx.putImageData(img, 0, 0);
+    } catch {}
+    return c;
+  }, []);
+
+  // Lista de jogadores BRA (filtra FIGURINHAS) — pool de match do OCR.
+  const jogadoresFrente = useMemo(
+    () => FIGURINHAS.filter((f) => f.codigo.startsWith('BRA')),
+    []
+  );
+
   useEffect(() => {
     handlerStickerDetectadoRef.current = (sticker: Sticker) => {
       const adicionarFinal = (idEscolhido: string) => {
@@ -772,63 +917,37 @@ export default function ScanPage() {
       if (!cancelado) timeoutId = setTimeout(tickVerso, turboAtivo ? 350 : 600);
     };
 
-    const tickFrente = () => {
+    const tickFrente = async () => {
       if (cancelado) return;
+      const worker = workerRef.current;
       const v = videoRef.current;
-      const payload = frontHashesRef.current;
-      if (!v || v.readyState < 2 || pausadoRef.current || !payload) {
+      if (!worker || !v || v.readyState < 2 || pausadoRef.current) {
         timeoutId = setTimeout(tickFrente, FRONT_TICK_MS);
         return;
       }
       try {
         setEscaneando(true);
-        // Multi-amostra: 8 capturas em escalas/posições diferentes. Cada uma
-        // gera seu top-1; depois votamos qual id ganhou mais amostras.
-        const votos = new Map<string, number>();
-        const melhorPorId = new Map<string, MatchResult>();
-        for (const samp of FRONT_SAMPLES) {
-          const cap = capturarFrente(samp.dx, samp.dy, samp.scale);
-          if (!cap) continue;
-          const hash = computeDHashFromImageData(cap.hash);
-          const cor = computeColorHistFromImageData(cap.cor);
-          const tops = rankearTopK(hash, cor, payload.items, 1);
-          if (!tops.length) continue;
-          const t = tops[0];
-          votos.set(t.id, (votos.get(t.id) ?? 0) + 1);
-          const ja = melhorPorId.get(t.id);
-          if (!ja || t.score < ja.score) melhorPorId.set(t.id, t);
-        }
-        if (votos.size === 0) {
+        const canvas = capturarBanner();
+        if (!canvas) {
           if (!cancelado) timeoutId = setTimeout(tickFrente, FRONT_TICK_MS);
           return;
         }
+        const { data } = await worker.recognize(canvas);
+        const texto = (data?.text ?? '').trim();
+        const match = matchPlayerByOCR(texto, jogadoresFrente);
+        setOcrFrente({ text: texto, match });
+        if (debugAtivo) {
+          try {
+            setDebugFrame(canvas.toDataURL('image/png'));
+          } catch {}
+        }
 
-        // id vencedor do tick (maior número de votos)
-        let idVencedor = '';
-        let votosVencedor = 0;
-        votos.forEach((v, id) => {
-          if (v > votosVencedor) {
-            votosVencedor = v;
-            idVencedor = id;
-          }
-        });
-        const candidato = melhorPorId.get(idVencedor) ?? null;
-        setUltimoCandidatoFrente(candidato);
-
-        // Gates pra disparar: voto majoritário forte no tick + score absoluto
-        // baixo + gap claro até o 2º melhor.
-        const gap = candidato
-          ? candidato.scoreSegundoMaisProximo - candidato.score
-          : 0;
         if (
-          candidato &&
-          votosVencedor >= FRONT_TICK_VOTO_MIN &&
-          candidato.score <= FRONT_AUTO_SCORE_MAX &&
-          gap >= FRONT_AUTO_GAP_MIN &&
+          match &&
+          match.confidence >= FRONT_OCR_AUTO_CONFIDENCE &&
           !pausadoRef.current
         ) {
-          const sticker = figurinhaPorId(candidato.id);
-          if (sticker) handlerStickerDetectadoRef.current(sticker);
+          handlerStickerDetectadoRef.current(match.player);
         }
       } catch {
         // ignora erro pontual e segue
@@ -1119,24 +1238,24 @@ export default function ScanPage() {
           let conteudo: React.ReactNode;
 
           if (escaneando) {
-            conteudo = 'Lendo…';
+            conteudo = modoCaptura === 'frente' ? 'OCR…' : 'Lendo…';
           } else if (modoCaptura !== 'frente') {
             conteudo = 'Pronto p/ ler';
-          } else if (!frontHashesProntos) {
-            conteudo = 'Carregando…';
-          } else if (!ultimoCandidatoFrente) {
-            conteudo = 'Pronto p/ foto';
+          } else if (!ocrFrente || !ocrFrente.match) {
+            conteudo = 'Aponte a figurinha';
           } else {
-            const t = ultimoCandidatoFrente;
-            const gap = t.scoreSegundoMaisProximo - t.score;
-            const passou = t.score <= FRONT_AUTO_SCORE_MAX && gap >= FRONT_AUTO_GAP_MIN;
-            if (passou) {
+            const m = ocrFrente.match;
+            const conf = m.confidence;
+            if (conf >= FRONT_OCR_AUTO_CONFIDENCE) {
               corBorda = '#22c55e';
               corTexto = '#22c55e';
               corIcone = '#22c55e';
+            } else if (conf >= 0.5) {
+              corBorda = '#fbbf24';
+              corTexto = '#fbbf24';
+              corIcone = '#fbbf24';
             }
-            const sim = Math.max(0, 1 - t.score) * 100;
-            conteudo = `${t.id} ${sim.toFixed(0)}%`;
+            conteudo = `${m.player.codigo} ${(conf * 100).toFixed(0)}%`;
           }
 
           return (
@@ -1367,7 +1486,7 @@ export default function ScanPage() {
                 textOverflow: 'ellipsis',
               }}
             >
-              Centralize a <b style={{ color: '#22c55e' }}>figurinha</b> na moldura
+              Enquadre a <b style={{ color: '#22c55e' }}>figurinha inteira</b> na moldura
             </div>
             <div
               style={{
@@ -1381,12 +1500,7 @@ export default function ScanPage() {
                 color: '#fbbf24',
               }}
             >
-              Beta — só Brasil
-              {frontHashesErro
-                ? ` · falha ao carregar (${frontHashesErro})`
-                : !frontHashesProntos
-                ? ' · carregando catálogo…'
-                : ''}
+              Beta — só Brasil · OCR do nome do jogador
             </div>
           </>
         )}
@@ -1459,6 +1573,28 @@ export default function ScanPage() {
               {ultimoTexto || '—'}
             </div>
           </div>
+          {modoCaptura === 'frente' && ocrFrente && (
+            <div>
+              <div style={{ color: '#94a3b8', marginBottom: 2 }}>OCR banner</div>
+              <div
+                style={{
+                  fontFamily: 'monospace',
+                  background: 'rgba(0,0,0,0.45)',
+                  padding: '6px 8px',
+                  borderRadius: 6,
+                  fontSize: 10,
+                  marginBottom: 6,
+                }}
+              >
+                {ocrFrente.text || '—'}
+              </div>
+              <div style={{ fontFamily: 'monospace', color: '#fcd34d', fontSize: 11 }}>
+                {ocrFrente.match
+                  ? `${ocrFrente.match.player.codigo} ${ocrFrente.match.player.nome} → ${(ocrFrente.match.confidence * 100).toFixed(0)}%`
+                  : 'sem candidato'}
+              </div>
+            </div>
+          )}
           <div>
             <div style={{ color: '#94a3b8', marginBottom: 2 }}>Candidatos</div>
             <div style={{ fontFamily: 'monospace' }}>
