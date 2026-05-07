@@ -84,16 +84,23 @@ const FRONT_TICK_MS = 120;
 const FRONT_TOP_K = 3;
 const FRONT_AUTO_SCORE_MAX = 0.22;
 const FRONT_AUTO_GAP_MIN = 0.08;
-// Amostragem multi-posição por tick (centro + 4 offsets) com VOTO entre as
-// posições — só consideramos auto-fire se a maioria delas eleger o mesmo id.
-const FRONT_OFFSETS: { dx: number; dy: number }[] = [
-  { dx: 0, dy: 0 },
-  { dx: -0.1, dy: 0 },
-  { dx: 0.1, dy: 0 },
-  { dx: 0, dy: -0.1 },
-  { dx: 0, dy: 0.1 },
+// Amostragem multi-escala + multi-posição por tick. Escala compensa o usuário
+// que segura a figurinha longe (sticker ocupa pouco do viewport — em alguma
+// escala menor o crop fica preenchido); offsets compensam fora-de-centro.
+// Voto entre as amostras: maioria do mesmo id = candidato a auto-fire.
+const FRONT_SAMPLES: { dx: number; dy: number; scale: number }[] = [
+  // multi-escala no centro: lida com sticker pequeno/grande no quadro
+  { dx: 0, dy: 0, scale: 1.0 },
+  { dx: 0, dy: 0, scale: 0.7 },
+  { dx: 0, dy: 0, scale: 0.5 },
+  { dx: 0, dy: 0, scale: 0.35 },
+  // multi-posição na escala cheia: lida com fora-de-centro
+  { dx: -0.12, dy: 0, scale: 1.0 },
+  { dx: 0.12, dy: 0, scale: 1.0 },
+  { dx: 0, dy: -0.12, scale: 1.0 },
+  { dx: 0, dy: 0.12, scale: 1.0 },
 ];
-const FRONT_OFFSET_VOTO_MIN = 3; // 3 das 5 posições no mesmo id pra auto-fire
+const FRONT_OFFSET_VOTO_MIN = 4; // 4 das 8 amostras no mesmo id pra auto-fire
 
 type ModoScan = 'turbo' | 'legacy';
 type ModoCaptura = 'verso' | 'frente';
@@ -564,7 +571,8 @@ export default function ScanPage() {
   const calcularCropFrente = useCallback(
     (
       dx = 0,
-      dy = 0
+      dy = 0,
+      scale = 1
     ): { sx: number; sy: number; sw: number; sh: number } | null => {
       if (!videoRef.current) return null;
       const v = videoRef.current;
@@ -575,10 +583,13 @@ export default function ScanPage() {
       if (!sw || !sh || !vw || !vh) return null;
 
       const FRAME_RATIO_WH = 5 / 6.5; // largura / altura, espelha o overlay
-      let frameW = vw * 0.85;
+      // Frame base = 70% da largura do viewport (menor que antes, pra forçar
+      // o usuário a aproximar). Scale aplicado depois encolhe ainda mais o
+      // recorte de hash sem mexer no overlay verde.
+      let frameW = vw * 0.7 * scale;
       let frameH = frameW / FRAME_RATIO_WH;
-      if (frameH > vh * 0.78) {
-        frameH = vh * 0.78;
+      if (frameH > vh * 0.7 * scale) {
+        frameH = vh * 0.7 * scale;
         frameW = frameH * FRAME_RATIO_WH;
       }
       // dx/dy são frações do tamanho do frame — desloca o "alvo" sem sair
@@ -616,13 +627,14 @@ export default function ScanPage() {
   // os dois drawImage). Devolve null se vídeo ainda não tem dimensões válidas.
   const capturarFrente = useCallback((
     dx = 0,
-    dy = 0
+    dy = 0,
+    scale = 1
   ): {
     hash: ImageData;
     cor: ImageData;
   } | null => {
     if (!canvasRef.current || !videoRef.current) return null;
-    const crop = calcularCropFrente(dx, dy);
+    const crop = calcularCropFrente(dx, dy, scale);
     if (!crop) return null;
     const c = canvasRef.current;
     const v = videoRef.current;
@@ -773,8 +785,8 @@ export default function ScanPage() {
         // posições — colapsa duplicatas pelo melhor score.
         const todosPorId = new Map<string, MatchResult>();
         const votosPorId = new Map<string, number>();
-        for (const off of FRONT_OFFSETS) {
-          const cap = capturarFrente(off.dx, off.dy);
+        for (const samp of FRONT_SAMPLES) {
+          const cap = capturarFrente(samp.dx, samp.dy, samp.scale);
           if (!cap) continue;
           const hash = computeDHashFromImageData(cap.hash);
           const cor = computeColorHistFromImageData(cap.cor);
@@ -1035,8 +1047,8 @@ export default function ScanPage() {
             left: '50%',
             top: '50%',
             transform: 'translate(-50%, -50%)',
-            width: '85%',
-            maxHeight: '78%',
+            width: '70%',
+            maxHeight: '70%',
             aspectRatio: '5 / 6.5',
             border: '2px solid #22c55e',
             borderRadius: 14,
@@ -1355,7 +1367,7 @@ export default function ScanPage() {
                 textOverflow: 'ellipsis',
               }}
             >
-              Toque no <b style={{ color: '#22c55e' }}>jogador certo</b> abaixo
+              <b style={{ color: '#22c55e' }}>Encoste a figurinha</b> na moldura
             </div>
             <div
               style={{
