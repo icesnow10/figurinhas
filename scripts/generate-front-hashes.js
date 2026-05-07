@@ -46,8 +46,30 @@ function lerImagensReais() {
   return map;
 }
 
-async function dHashHex(arquivo) {
+// Variantes de crop a partir de cada imagem-fonte. A câmera pode capturar a
+// figurinha inteira ou só uma região (player, topo da cara, etc). Hashear
+// múltiplas variantes da fonte dá várias âncoras pro matching encontrar.
+const VARIANTES = [
+  { name: 'full', xRel: 0.0, yRel: 0.0, wRel: 1.0, hRel: 1.0 },
+  { name: 'center', xRel: 0.15, yRel: 0.1, wRel: 0.7, hRel: 0.7 },
+  { name: 'player', xRel: 0.1, yRel: 0.05, wRel: 0.8, hRel: 0.6 }, // foto do jogador (topo)
+  { name: 'face', xRel: 0.25, yRel: 0.05, wRel: 0.5, hRel: 0.4 }, // só rosto/cabeça
+];
+
+function cropParams(meta, v) {
+  const W = meta.width;
+  const H = meta.height;
+  return {
+    left: Math.max(0, Math.round(W * v.xRel)),
+    top: Math.max(0, Math.round(H * v.yRel)),
+    width: Math.min(W, Math.round(W * v.wRel)),
+    height: Math.min(H, Math.round(H * v.hRel)),
+  };
+}
+
+async function dHashHexVariante(arquivo, meta, v) {
   const raw = await sharp(arquivo)
+    .extract(cropParams(meta, v))
     .resize(17, 16, { fit: 'fill' })
     .grayscale()
     .raw()
@@ -69,9 +91,10 @@ async function dHashHex(arquivo) {
 
 // Histograma 2D Hue (12 bins) × Saturation (6 bins) = 72 bins, encodado como
 // hex uint8 com sqrt scaling (melhora resolução nos bins pequenos). Ignoramos
-// Value pra ser robusto a iluminação. 64x64 px = 4096 amostras por imagem.
-async function colorHistHex(arquivo) {
+// Value pra ser robusto a iluminação. 64x64 px = 4096 amostras por variante.
+async function colorHistHexVariante(arquivo, meta, v) {
   const raw = await sharp(arquivo)
+    .extract(cropParams(meta, v))
     .resize(64, 64, { fit: 'fill' })
     .raw()
     .toBuffer();
@@ -128,8 +151,17 @@ async function colorHistHex(arquivo) {
       continue;
     }
     try {
-      const [h, c] = await Promise.all([dHashHex(abs), colorHistHex(abs)]);
-      items.push({ id, h, c });
+      const meta = await sharp(abs).metadata();
+      const variants = await Promise.all(
+        VARIANTES.map(async (v) => {
+          const [h, c] = await Promise.all([
+            dHashHexVariante(abs, meta, v),
+            colorHistHexVariante(abs, meta, v),
+          ]);
+          return { name: v.name, h, c };
+        })
+      );
+      items.push({ id, variants });
     } catch (e) {
       console.error(`[front-hashes] FALHA ${id}: ${e.message}`);
       ausentes++;
@@ -137,10 +169,11 @@ async function colorHistHex(arquivo) {
   }
 
   const payload = {
-    version: 2,
+    version: 3,
     generatedAt: new Date().toISOString(),
     filtro: FILTRO_PREFIXOS.join(','),
     algorithm: 'dHash-17x16-256bit + HS-histogram-12x6-sqrt-uint8',
+    variantes: VARIANTES.map((v) => v.name),
     items,
   };
   fs.writeFileSync(SAIDA, JSON.stringify(payload, null, 2) + '\n');

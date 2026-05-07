@@ -5,7 +5,15 @@
 // O score final é uma soma ponderada dos dois (60% hash + 40% cor).
 // As funções deste arquivo DEVEM bater bit-a-bit com scripts/generate-front-hashes.js.
 
-export type FrontHashItem = { id: string; h: string; c?: string };
+export type FrontHashVariant = { name?: string; h: string; c?: string };
+export type FrontHashItem = {
+  id: string;
+  // schema novo (v3): múltiplas variantes (full / center / player / face)
+  variants?: FrontHashVariant[];
+  // schema antigo (v2 e antes): hash único na raiz
+  h?: string;
+  c?: string;
+};
 
 export type FrontHashesPayload = {
   version: number;
@@ -161,6 +169,32 @@ export type RankConfig = {
 
 const DEFAULT_RANK: RankConfig = { hashWeight: 0.6, colorWeight: 0.4 };
 
+// Para um item (que pode ter múltiplas variantes), devolve o melhor score
+// pairwise contra a câmera. Cada variante é uma "âncora" diferente — a mais
+// próxima da framing atual da câmera ganha.
+function melhorScoreParaItem(
+  hashHex: string,
+  colorHex: string | null,
+  item: FrontHashItem,
+  config: RankConfig
+): { hd: number; cd: number; score: number } | null {
+  const variantes: FrontHashVariant[] =
+    item.variants && item.variants.length
+      ? item.variants
+      : item.h
+      ? [{ h: item.h, c: item.c }]
+      : [];
+  if (!variantes.length) return null;
+  let melhor: { hd: number; cd: number; score: number } | null = null;
+  for (const v of variantes) {
+    const hd = hammingHex(hashHex, v.h);
+    const cd = colorHex && v.c ? bhattacharyyaHex(colorHex, v.c) : 0.5;
+    const score = config.hashWeight * (hd / 256) + config.colorWeight * cd;
+    if (!melhor || score < melhor.score) melhor = { hd, cd, score };
+  }
+  return melhor;
+}
+
 // Ranqueia TODOS os items e devolve os top-K em ordem ascendente de score.
 // Cada elemento tem o score do PRÓXIMO no ranking como segundoMaisProximo,
 // pra preservar a noção de "gap até o próximo candidato" usada nos gates.
@@ -174,11 +208,9 @@ export function rankearTopK(
   if (!items.length) return [];
   const todos: { id: string; hd: number; cd: number; score: number }[] = [];
   for (let i = 0; i < items.length; i++) {
-    const hd = hammingHex(hashHex, items[i].h);
-    const itemCor = items[i].c;
-    const cd = colorHex && itemCor ? bhattacharyyaHex(colorHex, itemCor) : 0.5;
-    const score = config.hashWeight * (hd / 256) + config.colorWeight * cd;
-    todos.push({ id: items[i].id, hd, cd, score });
+    const m = melhorScoreParaItem(hashHex, colorHex, items[i], config);
+    if (!m) continue;
+    todos.push({ id: items[i].id, hd: m.hd, cd: m.cd, score: m.score });
   }
   todos.sort((a, b) => a.score - b.score);
   const out: MatchResult[] = [];
