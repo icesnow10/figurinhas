@@ -78,17 +78,15 @@ const SCAN_CAPTURA_KEY = 'figurinhas:scan:captura';
 const QUICK_DURATION_MS = 10_000;
 const MAX_NOTIFICACOES_QUICK = 2;
 // Discovery (1-to-N): igual ao OCR — câmera identifica sozinha qual figurinha
-// é, e dispara o modal de confirmação. Pra evitar falso positivo:
-//   - Multi-amostra por tick (8 capturas em escalas/posições diferentes)
-//   - Voto entre amostras: id vencedor precisa ganhar maioria
-//   - Voto temporal: id vencedor precisa repetir em ticks seguidos
-//   - Score absoluto baixo + gap grande até o 2º
-const FRONT_TICK_MS = 200;
-const FRONT_AUTO_SCORE_MAX = 0.28;
+// é, e dispara o modal de confirmação. Pra ser rápido E confiável:
+//   - 8 amostras por tick (escalas + posições) com voto majoritário forte (6/8)
+//   - Score absoluto baixo + gap claro até o 2º
+//   - 1 tick basta pra disparar (já que a votação intra-tick é forte)
+// Compute por tick: ~10ms (8 amostras × 20 candidatos × hash+cor).
+const FRONT_TICK_MS = 80;
+const FRONT_AUTO_SCORE_MAX = 0.30;
 const FRONT_AUTO_GAP_MIN = 0.05;
-const FRONT_TICK_VOTO_MIN = 5; // 5 das 8 amostras no mesmo id
-const FRONT_HIST_SIZE = 3;
-const FRONT_HIST_CONSENSO_MIN = 2; // 2 dos últimos 3 ticks no mesmo id
+const FRONT_TICK_VOTO_MIN = 6; // 6 das 8 amostras no mesmo id (75% intra-tick)
 // Amostragem multi-escala + multi-posição por tick. Escala compensa o usuário
 // que segura a figurinha longe (sticker ocupa pouco do viewport — em alguma
 // escala menor o crop fica preenchido); offsets compensam fora-de-centro.
@@ -214,7 +212,6 @@ export default function ScanPage() {
   const [frontHashesProntos, setFrontHashesProntos] = useState(false);
   const [frontHashesErro, setFrontHashesErro] = useState<string | null>(null);
   const [ultimoCandidatoFrente, setUltimoCandidatoFrente] = useState<MatchResult | null>(null);
-  const historicoIdsFrenteRef = useRef<string[]>([]);
 
   useEffect(() => {
     try {
@@ -251,7 +248,6 @@ export default function ScanPage() {
   const escolherCaptura = useCallback((proximo: ModoCaptura) => {
     setModoCaptura(proximo);
     setUltimoCandidatoFrente(null);
-    historicoIdsFrenteRef.current = [];
     try {
       window.localStorage.setItem(SCAN_CAPTURA_KEY, proximo);
     } catch {}
@@ -819,26 +815,18 @@ export default function ScanPage() {
         const candidato = melhorPorId.get(idVencedor) ?? null;
         setUltimoCandidatoFrente(candidato);
 
-        // janela temporal: id vencedor entra na história
-        const hist = historicoIdsFrenteRef.current;
-        hist.push(idVencedor);
-        if (hist.length > FRONT_HIST_SIZE) hist.shift();
-        const ocorrenciasNaJanela = hist.filter((x) => x === idVencedor).length;
-
-        // Gates pra disparar: voto majoritário no tick + consenso temporal +
-        // score absoluto baixo + gap claro.
+        // Gates pra disparar: voto majoritário forte no tick + score absoluto
+        // baixo + gap claro até o 2º melhor.
         const gap = candidato
           ? candidato.scoreSegundoMaisProximo - candidato.score
           : 0;
         if (
           candidato &&
           votosVencedor >= FRONT_TICK_VOTO_MIN &&
-          ocorrenciasNaJanela >= FRONT_HIST_CONSENSO_MIN &&
           candidato.score <= FRONT_AUTO_SCORE_MAX &&
           gap >= FRONT_AUTO_GAP_MIN &&
           !pausadoRef.current
         ) {
-          historicoIdsFrenteRef.current = [];
           const sticker = figurinhaPorId(candidato.id);
           if (sticker) handlerStickerDetectadoRef.current(sticker);
         }
@@ -1393,7 +1381,7 @@ export default function ScanPage() {
                 color: '#fbbf24',
               }}
             >
-              Beta — Brasil e Argélia
+              Beta — só Brasil
               {frontHashesErro
                 ? ` · falha ao carregar (${frontHashesErro})`
                 : !frontHashesProntos

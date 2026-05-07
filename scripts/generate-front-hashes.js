@@ -11,7 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const sharp = require('sharp');
 
-const FILTRO_PREFIXOS = ['BRA', 'ALG'];
+const FILTRO_PREFIXOS = ['BRA'];
 const ROOT = path.join(__dirname, '..');
 const ARQUIVO_FIGURINHAS = path.join(ROOT, 'resources', 'data', 'figurinhas.ts');
 const PUBLIC_DIR = path.join(ROOT, 'public');
