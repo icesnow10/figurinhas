@@ -599,23 +599,23 @@ export default function ScanPage() {
 
       const viewportRatio = vw / vh;
       const videoRatio = sw / sh;
-      let scale: number;
+      let coverScale: number;
       let offsetX: number;
       let offsetY: number;
       if (videoRatio > viewportRatio) {
-        scale = vh / sh;
-        offsetX = (vw - sw * scale) / 2;
+        coverScale = vh / sh;
+        offsetX = (vw - sw * coverScale) / 2;
         offsetY = 0;
       } else {
-        scale = vw / sw;
+        coverScale = vw / sw;
         offsetX = 0;
-        offsetY = (vh - sh * scale) / 2;
+        offsetY = (vh - sh * coverScale) / 2;
       }
 
-      const sx = Math.max(0, Math.floor((frameX - offsetX) / scale));
-      const sy = Math.max(0, Math.floor((frameY - offsetY) / scale));
-      const sCropW = Math.min(sw - sx, Math.floor(frameW / scale));
-      const sCropH = Math.min(sh - sy, Math.floor(frameH / scale));
+      const sx = Math.max(0, Math.floor((frameX - offsetX) / coverScale));
+      const sy = Math.max(0, Math.floor((frameY - offsetY) / coverScale));
+      const sCropW = Math.min(sw - sx, Math.floor(frameW / coverScale));
+      const sCropH = Math.min(sh - sy, Math.floor(frameH / coverScale));
       if (sCropW <= 0 || sCropH <= 0) return null;
       return { sx, sy, sw: sCropW, sh: sCropH };
     },
