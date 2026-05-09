@@ -4,7 +4,9 @@
       "Bash(npx tsc *)",
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Regiani\\\\downloads\\\\figurinhas-app\\\\public\" -Recurse -File)",
       "Bash(Select-Object FullName)",
-      "Bash(npx vercel *)"
+      "Bash(npx vercel *)",
+      "Bash(mkdir -p \"/c/Users/Regiani/downloads/dev/figurinhas\")",
+      "Bash(rsync -a --exclude='node_modules' --exclude='.next' ./ \"/c/Users/Regiani/downloads/dev/figurinhas/\")"
     ]
   }
 }
