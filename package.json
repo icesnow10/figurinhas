@@ -9,9 +9,12 @@
     "lint": "next lint",
     "tunnel": "npx --yes localtunnel --port 50 --subdomain figurinhas-copa-2026",
     "tunnel:cf": "cloudflared tunnel --url http://localhost:50",
-    "generate-front-hashes": "node scripts/generate-front-hashes.js"
+    "download-models": "node scripts/download-models.js",
+    "generate-embeddings-brazil": "node scripts/generate-embeddings-brazil.js",
+    "postinstall": "node scripts/download-models.js"
   },
   "dependencies": {
+    "@vladmandic/face-api": "^1.7.14",
     "antd": "^5.21.0",
     "lucide-react": "^0.460.0",
     "next": "14.2.18",

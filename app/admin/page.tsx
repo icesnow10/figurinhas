@@ -6,6 +6,7 @@ import { Button, InputNumber, Popconfirm, Switch, message } from 'antd';
 import type { InputNumberRef } from 'rc-input-number';
 import { ArrowLeft, Bug, Minus, Plus, Star, Trash2, Users } from 'lucide-react';
 import { MASTER_ID, usePerfil } from '@/resources/hooks/usePerfil';
+import { EmbeddingsStats } from '@/components/admin/EmbeddingsStats';
 
 const MASTER_PIN = '1788';
 const LIMITE_MIN = 1;
@@ -313,6 +314,8 @@ export default function AdminPage() {
         </div>
         <Switch checked={scanDebug} onChange={alternarScanDebug} />
       </div>
+
+      <EmbeddingsStats />
 
       <div className="section-title">
         <h3>Usuarios</h3>

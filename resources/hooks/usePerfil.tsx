@@ -15,6 +15,7 @@ export interface Perfil {
   criadoEm: number;
   ultimoLoginEm?: number;
   temPin: boolean;
+  ultimoAnuncioVisto?: string;
 }
 
 interface PerfilContextType {
@@ -35,6 +36,7 @@ interface PerfilContextType {
   ) => Promise<{ perfil: Perfil | null; erro?: string; codigo?: string; limite?: number }>;
   renomear: (id: string, nome: string) => Promise<void>;
   definirPin: (id: string, pin: string | null, pinAtual?: string) => Promise<boolean>;
+  marcarAnuncioVisto: (anuncioId: string) => Promise<void>;
   deletar: (id: string) => Promise<void>;
 }
 
@@ -270,6 +272,19 @@ export function PerfilProvider({ children }: { children: ReactNode }) {
     []
   );
 
+  const marcarAnuncioVisto = useCallback(async (anuncioId: string) => {
+    setPerfis((prev) =>
+      prev.map((p) => (p.id === perfilId ? { ...p, ultimoAnuncioVisto: anuncioId } : p))
+    );
+    try {
+      await fetch('/api/perfis', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: perfilId, ultimoAnuncioVisto: anuncioId }),
+      });
+    } catch {}
+  }, [perfilId]);
+
   const deletar = useCallback(
     async (id: string) => {
       try {
@@ -308,6 +323,7 @@ export function PerfilProvider({ children }: { children: ReactNode }) {
         criar,
         renomear,
         definirPin,
+        marcarAnuncioVisto,
         deletar,
       }}
     >

@@ -117,6 +117,7 @@ export default function ColecaoPage() {
                       options={[
                         { label: 'Grupos', value: 'grupos' },
                         { label: 'Alfabetica', value: 'alfabetica' },
+                        { label: 'Completude', value: 'completude' },
                       ]}
                     />
                     <Radio.Group

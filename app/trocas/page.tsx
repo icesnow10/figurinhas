@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Button, Collapse, Tabs, Empty, Input, Skeleton, Switch, Tag, message } from 'antd';
+import { Button, Collapse, Progress, Tabs, Empty, Input, Skeleton, Switch, Tag, message } from 'antd';
 import { Copy, Eye, Plus, Trash2 } from 'lucide-react';
 import { Header } from '@/components/layout/Header';
 import { useColecao } from '@/resources/hooks/useColecao';
@@ -124,6 +124,18 @@ interface AmigoSalvo {
   nome: string;
 }
 
+interface ResumoAlbum {
+  coletadas: number;
+  totalAlbum: number;
+  faltantes: number;
+  percentual: number;
+}
+
+interface RankingItem extends ResumoAlbum {
+  id: string;
+  nome: string;
+}
+
 function isBrilhante(sticker: StickerType) {
   return sticker.tipo === 'especial' || (sticker.tipo === 'selecao' && sticker.numero === 1);
 }
@@ -149,6 +161,30 @@ export default function TrocasPage() {
   const [trocaJustaPorAmigo, setTrocaJustaPorAmigo] = useState<Record<string, boolean>>({});
   const [trocaCompletar, setTrocaCompletar] = useState(false);
   const [apenasMatch, setApenasMatch] = useState(false);
+  const [resumoPorAmigo, setResumoPorAmigo] = useState<Record<string, ResumoAlbum>>({});
+
+  useEffect(() => {
+    let ativo = true;
+    fetch('/api/ranking', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : { ranking: [] }))
+      .then((data: { ranking?: RankingItem[] }) => {
+        if (!ativo) return;
+        const mapa: Record<string, ResumoAlbum> = {};
+        (data.ranking ?? []).forEach((item) => {
+          mapa[item.id] = {
+            coletadas: item.coletadas,
+            totalAlbum: item.totalAlbum,
+            faltantes: item.faltantes,
+            percentual: item.percentual,
+          };
+        });
+        setResumoPorAmigo(mapa);
+      })
+      .catch(() => {});
+    return () => {
+      ativo = false;
+    };
+  }, []);
 
   const meusFaltantesPorSelecao = useMemo(() => faltamPorSelecao(estado), [estado]);
 
@@ -349,12 +385,68 @@ export default function TrocasPage() {
                         const id = Array.isArray(key) ? key[0] : key;
                         setAmigoAtivoId(id ? String(id) : null);
                       }}
-                      items={amigos.map((amigo) => ({
+                      items={amigos.map((amigo) => {
+                        const resumo = resumoPorAmigo[amigo.id];
+                        return ({
                         key: amigo.id,
                         label: (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <Eye size={15} color="#22c55e" />
-                            <span style={{ color: '#fff', fontWeight: 700 }}>{amigo.nome}</span>
+                          <div
+                            style={{
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: 4,
+                              minWidth: 0,
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <Eye size={15} color="#22c55e" />
+                              <span
+                                style={{
+                                  color: '#fff',
+                                  fontWeight: 700,
+                                  flex: 1,
+                                  minWidth: 0,
+                                  whiteSpace: 'nowrap',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                }}
+                              >
+                                {amigo.nome}
+                              </span>
+                              {resumo && (
+                                <>
+                                  <span style={{ color: '#22c55e', fontSize: 11, fontWeight: 700 }}>
+                                    {resumo.coletadas}/{resumo.totalAlbum}
+                                  </span>
+                                  <span
+                                    style={{
+                                      color: '#fff',
+                                      fontSize: 11,
+                                      fontWeight: 800,
+                                      minWidth: 32,
+                                      textAlign: 'right',
+                                    }}
+                                  >
+                                    {resumo.percentual}%
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                            {resumo && (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <Progress
+                                  percent={resumo.percentual}
+                                  showInfo={false}
+                                  strokeColor="#22c55e"
+                                  trailColor="rgba(255,255,255,0.08)"
+                                  size="small"
+                                  style={{ margin: 0, flex: 1 }}
+                                />
+                                <span style={{ color: '#9aa6c9', fontSize: 10 }}>
+                                  faltam {resumo.faltantes}
+                                </span>
+                              </div>
+                            )}
                           </div>
                         ),
                         extra: (
@@ -389,7 +481,8 @@ export default function TrocasPage() {
                           ) : (
                             <div style={{ color: '#9aa6c9' }}>Clique para ver as trocas.</div>
                           ),
-                      }))}
+                        });
+                      })}
                     />
                   )}
                 </div>

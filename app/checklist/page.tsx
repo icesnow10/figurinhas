@@ -14,6 +14,7 @@ import { useHistorico } from '@/resources/hooks/useHistorico';
 import type { Sticker as StickerType } from '@/resources/types';
 
 type FiltroStatus = 'todas' | 'tenho' | 'repetidas' | 'nao_tenho';
+type OrdemChecklist = 'grupos' | 'alfabetica' | 'completude';
 
 export default function ChecklistPage() {
   const { temSlot, duplicadasSlot } = useColecao();
@@ -22,6 +23,7 @@ export default function ChecklistPage() {
   const [busca, setBusca] = useState(() => searchParams?.get('busca') ?? '');
   const [paises, setPaises] = useState<string[]>([]);
   const [status, setStatus] = useState<FiltroStatus>('todas');
+  const [ordem, setOrdem] = useState<OrdemChecklist>('grupos');
   const [historicoAberto, setHistoricoAberto] = useState(false);
 
   const opcoesPaises = useMemo(
@@ -135,6 +137,21 @@ export default function ChecklistPage() {
               ]}
             />
           </div>
+
+          <div>
+            <label style={filterLabelStyle}>Ordenar</label>
+            <Radio.Group
+              optionType="button"
+              buttonStyle="solid"
+              value={ordem}
+              onChange={(e) => setOrdem(e.target.value)}
+              options={[
+                { label: 'Grupos', value: 'grupos' },
+                { label: 'Alfabetica', value: 'alfabetica' },
+                { label: 'Completude', value: 'completude' },
+              ]}
+            />
+          </div>
         </div>
 
         <div style={{ marginTop: 12, fontSize: 12, color: '#9aa6c9' }}>
@@ -147,7 +164,7 @@ export default function ChecklistPage() {
             <Empty description="Nenhuma figurinha com esses filtros" />
           </div>
         ) : (
-          <div style={{ marginTop: 12 }}>{renderBlocos(lista, temSlot)}</div>
+          <div style={{ marginTop: 12 }}>{renderBlocos(lista, temSlot, ordem)}</div>
         )}
       </div>
       <HistoricoModal aberto={historicoAberto} onFechar={() => setHistoricoAberto(false)} />
@@ -155,7 +172,11 @@ export default function ChecklistPage() {
   );
 }
 
-function renderBlocos(lista: StickerType[], tem: (id: string) => boolean) {
+function renderBlocos(
+  lista: StickerType[],
+  tem: (id: string) => boolean,
+  ordem: OrdemChecklist
+) {
   const porSelecao = new Map<string, StickerType[]>();
   const especiais: StickerType[] = [];
 
@@ -170,13 +191,32 @@ function renderBlocos(lista: StickerType[], tem: (id: string) => boolean) {
 
   const blocos: React.ReactNode[] = [];
 
-  SELECOES.forEach((sel) => {
+  // Build the country list in the requested order. SELECOES is already grouped
+  // by `grupo` then by intra-group order, so 'grupos' just reuses it.
+  const selecoesOrdenadas = [...SELECOES];
+  if (ordem === 'alfabetica') {
+    selecoesOrdenadas.sort((a, b) =>
+      a.nome.localeCompare(b.nome, 'pt-BR', { sensitivity: 'base' })
+    );
+  } else if (ordem === 'completude') {
+    selecoesOrdenadas.sort((a, b) => {
+      const figsA = porSelecao.get(a.id) ?? [];
+      const figsB = porSelecao.get(b.id) ?? [];
+      const ratioA = figsA.length ? figsA.filter((f) => tem(f.id)).length / figsA.length : -1;
+      const ratioB = figsB.length ? figsB.filter((f) => tem(f.id)).length / figsB.length : -1;
+      if (ratioB !== ratioA) return ratioB - ratioA;
+      return a.nome.localeCompare(b.nome, 'pt-BR', { sensitivity: 'base' });
+    });
+  }
+
+  selecoesOrdenadas.forEach((sel) => {
     const figs = porSelecao.get(sel.id);
     if (!figs?.length) return;
+    const prefixoGrupo = ordem === 'grupos' && sel.grupo ? `Grupo ${sel.grupo} · ` : '';
     blocos.push(
       <GrupoFigurinhas
         key={sel.id}
-        titulo={`${sel.bandeira} ${sel.nome} (${sel.id})`}
+        titulo={`${prefixoGrupo}${sel.bandeira} ${sel.nome} (${sel.id})`}
         cor={sel.cor}
         figs={figs}
         tem={tem}

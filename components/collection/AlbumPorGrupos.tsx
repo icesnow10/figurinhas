@@ -6,7 +6,7 @@ import type { Selecao } from '@/resources/types';
 import { figurinhasPorSelecao } from '@/resources/data/figurinhas';
 import { useColecao } from '@/resources/hooks/useColecao';
 
-export type OrdemPaises = 'alfabetica' | 'grupos';
+export type OrdemPaises = 'alfabetica' | 'grupos' | 'completude';
 export type DirecaoOrdem = 'asc' | 'desc';
 export type FiltroCompletude = 'todas' | 'completas' | 'incompletas';
 
@@ -38,6 +38,13 @@ function filtrarSelecoes(busca: string) {
       s.nome.toLowerCase().includes(termo) ||
       s.id.toLowerCase().includes(termo)
   );
+}
+
+function razaoCompletude(selecaoId: string, tem: (id: string) => boolean): number {
+  const figs = figurinhasPorSelecao(selecaoId);
+  if (!figs.length) return 0;
+  const coletadas = figs.filter((f) => tem(f.id)).length;
+  return coletadas / figs.length;
 }
 
 function ordenarPorNome(selecoes: Selecao[], direcao: DirecaoOrdem) {
@@ -96,6 +103,22 @@ export function AlbumPorGrupos({
           COLUNAS_ALFA[densidade],
           densidade
         )}
+      </div>
+    );
+  }
+
+  if (ordem === 'completude') {
+    // Most complete first when direcao=asc (mirrors mental "best first"); flip
+    // for desc. Ties broken by name to keep ordering stable.
+    const ordenado = [...selecoesFiltradas].sort((a, b) => {
+      const ra = razaoCompletude(a.id, tem);
+      const rb = razaoCompletude(b.id, tem);
+      if (rb !== ra) return direcao === 'asc' ? rb - ra : ra - rb;
+      return a.nome.localeCompare(b.nome, 'pt-BR', { sensitivity: 'base' });
+    });
+    return (
+      <div style={{ marginTop: 12 }}>
+        {gradeSelecoes(ordenado, COLUNAS_ALFA[densidade], densidade)}
       </div>
     );
   }
