@@ -5,6 +5,7 @@ import { Progress } from 'antd';
 import type { Selecao } from '@/resources/types';
 import { useColecao } from '@/resources/hooks/useColecao';
 import { figurinhasPorSelecao } from '@/resources/data/figurinhas';
+import { SELECOES, formatarPaginas } from '@/resources/data/selecoes';
 
 export type DensidadeCard = 'pequeno' | 'medio' | 'grande';
 
@@ -60,6 +61,8 @@ export function SelecaoCard({ selecao, densidade = 'medio' }: Props) {
   const coletadas = figs.filter((f) => temSlot(f.id)).length;
   const completa = coletadas === figs.length;
   const e = ESCALAS[densidade];
+  const paginasLabel = formatarPaginas(selecao);
+  const numero = SELECOES.findIndex((s) => s.id === selecao.id) + 1;
 
   return (
     <Link
@@ -76,7 +79,40 @@ export function SelecaoCard({ selecao, densidade = 'medio' }: Props) {
         color: 'inherit',
       }}
     >
-      <div style={{ fontSize: e.bandeira, lineHeight: 1, textAlign: 'center' }}>
+      <div
+        title={`Seleção #${numero} · páginas ${paginasLabel} do álbum`}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 4,
+          fontSize: Math.max(8, e.counter - 2),
+          color: '#9aa6c9',
+          fontWeight: 700,
+          whiteSpace: 'nowrap',
+          lineHeight: 1,
+        }}
+      >
+        <span
+          style={{
+            background: 'rgba(255,255,255,0.06)',
+            padding: '1px 5px',
+            borderRadius: 5,
+          }}
+        >
+          #{numero}
+        </span>
+        <span
+          style={{
+            background: 'rgba(255,255,255,0.06)',
+            padding: '1px 5px',
+            borderRadius: 5,
+          }}
+        >
+          pg {paginasLabel}
+        </span>
+      </div>
+      <div style={{ textAlign: 'center', fontSize: e.bandeira, lineHeight: 1 }}>
         {selecao.bandeira}
       </div>
       <div
@@ -90,6 +126,20 @@ export function SelecaoCard({ selecao, densidade = 'medio' }: Props) {
       >
         {selecao.nome}{' '}
         <span style={{ color: '#9aa6c9', fontWeight: 600 }}>({selecao.id})</span>
+        {selecao.nomeEn !== selecao.nome && (
+          <div
+            style={{
+              fontSize: Math.max(9, e.nome - 2),
+              color: '#9aa6c9',
+              fontWeight: 500,
+              fontStyle: 'italic',
+              lineHeight: 1.1,
+              marginTop: 1,
+            }}
+          >
+            {selecao.nomeEn}
+          </div>
+        )}
       </div>
       <div
         style={{

@@ -41,6 +41,7 @@ interface PerfilContextType {
 }
 
 const STORAGE_KEY = 'figurinhas:perfilId';
+const PERFIL_CACHE_KEY = 'figurinhas:perfilAtualCache';
 const SESSION_UNLOCK_KEY = 'figurinhas:desbloqueados';
 export const MASTER_ID = 'icesnow10';
 const PERFIL_PADRAO = MASTER_ID;
@@ -66,6 +67,25 @@ function salvarDesbloqueados(s: Set<string>) {
   } catch {}
 }
 
+function lerPerfilCache(): Perfil | null {
+  try {
+    const raw = localStorage.getItem(PERFIL_CACHE_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw) as Perfil;
+    if (!p?.id || !p?.nome) return null;
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+function salvarPerfilCache(perfil: Perfil | null) {
+  try {
+    if (!perfil) localStorage.removeItem(PERFIL_CACHE_KEY);
+    else localStorage.setItem(PERFIL_CACHE_KEY, JSON.stringify(perfil));
+  } catch {}
+}
+
 export function PerfilProvider({ children }: { children: ReactNode }) {
   const [perfis, setPerfis] = useState<Perfil[]>([]);
   const [perfilId, setPerfilId] = useState<string>(PERFIL_PADRAO);
@@ -78,6 +98,8 @@ export function PerfilProvider({ children }: { children: ReactNode }) {
       const salvo = localStorage.getItem(STORAGE_KEY);
       if (salvo) setPerfilId(salvo);
     } catch {}
+    const cache = lerPerfilCache();
+    if (cache) setPerfis([cache]);
     setDesbloqueados(lerDesbloqueados());
   }, []);
 
@@ -132,7 +154,7 @@ export function PerfilProvider({ children }: { children: ReactNode }) {
           body: JSON.stringify({ id, pin }),
         });
         if (!r.ok) return false;
-        const { ok } = (await r.json()) as { ok: boolean };
+        const { ok, perfil } = (await r.json()) as { ok: boolean; perfil?: Perfil };
         if (!ok) return false;
         setDesbloqueados((prev) => {
           const next = new Set(prev);
@@ -140,6 +162,14 @@ export function PerfilProvider({ children }: { children: ReactNode }) {
           salvarDesbloqueados(next);
           return next;
         });
+        if (perfil) {
+          setPerfis((prev) =>
+            prev.some((p) => p.id === perfil.id)
+              ? prev.map((p) => (p.id === perfil.id ? perfil : p))
+              : [...prev, perfil]
+          );
+          salvarPerfilCache(perfil);
+        }
         persistir(id);
         return true;
       } catch {
@@ -171,6 +201,7 @@ export function PerfilProvider({ children }: { children: ReactNode }) {
             ? prev.map((p) => (p.id === perfil.id ? perfil : p))
             : [...prev, perfil]
         );
+        salvarPerfilCache(perfil);
         persistir(perfil.id);
         return true;
       } catch {
@@ -184,6 +215,8 @@ export function PerfilProvider({ children }: { children: ReactNode }) {
     const next = new Set<string>();
     setDesbloqueados(next);
     salvarDesbloqueados(next);
+    salvarPerfilCache(null);
+    setPerfis([]);
     persistir(PERFIL_PADRAO);
   }, [persistir]);
 
@@ -222,6 +255,7 @@ export function PerfilProvider({ children }: { children: ReactNode }) {
             return next;
           });
         }
+        salvarPerfilCache(perfil);
         persistir(perfil.id);
         return { perfil };
       } catch {
@@ -231,19 +265,23 @@ export function PerfilProvider({ children }: { children: ReactNode }) {
     [persistir]
   );
 
-  const renomear = useCallback(async (id: string, nome: string) => {
-    try {
-      const r = await fetch('/api/perfis', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, nome }),
-      });
-      if (r.ok) {
-        const { perfil } = (await r.json()) as { perfil: Perfil };
-        setPerfis((prev) => prev.map((p) => (p.id === id ? perfil : p)));
-      }
-    } catch {}
-  }, []);
+  const renomear = useCallback(
+    async (id: string, nome: string) => {
+      try {
+        const r = await fetch('/api/perfis', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, nome }),
+        });
+        if (r.ok) {
+          const { perfil } = (await r.json()) as { perfil: Perfil };
+          setPerfis((prev) => prev.map((p) => (p.id === id ? perfil : p)));
+          if (id === perfilId) salvarPerfilCache(perfil);
+        }
+      } catch {}
+    },
+    [perfilId]
+  );
 
   const definirPin = useCallback(
     async (id: string, pin: string | null, pinAtual?: string): Promise<boolean> => {
@@ -256,6 +294,7 @@ export function PerfilProvider({ children }: { children: ReactNode }) {
         if (!r.ok) return false;
         const { perfil } = (await r.json()) as { perfil: Perfil };
         setPerfis((prev) => prev.map((p) => (p.id === id ? perfil : p)));
+        if (id === perfilId) salvarPerfilCache(perfil);
         // se removeu pin, mantém desbloqueado; se definiu pin, marca como desbloqueado já
         setDesbloqueados((prev) => {
           const next = new Set(prev);
@@ -269,12 +308,17 @@ export function PerfilProvider({ children }: { children: ReactNode }) {
         return false;
       }
     },
-    []
+    [perfilId]
   );
 
   const marcarAnuncioVisto = useCallback(async (anuncioId: string) => {
     setPerfis((prev) =>
-      prev.map((p) => (p.id === perfilId ? { ...p, ultimoAnuncioVisto: anuncioId } : p))
+      prev.map((p) => {
+        if (p.id !== perfilId) return p;
+        const atualizado = { ...p, ultimoAnuncioVisto: anuncioId };
+        salvarPerfilCache(atualizado);
+        return atualizado;
+      })
     );
     try {
       await fetch('/api/perfis', {
@@ -296,7 +340,10 @@ export function PerfilProvider({ children }: { children: ReactNode }) {
           salvarDesbloqueados(next);
           return next;
         });
-        if (perfilId === id) persistir(PERFIL_PADRAO);
+        if (perfilId === id) {
+          salvarPerfilCache(null);
+          persistir(PERFIL_PADRAO);
+        }
       } catch {}
     },
     [perfilId, persistir]

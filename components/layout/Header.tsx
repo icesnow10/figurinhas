@@ -2,10 +2,12 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
-import { CircleHelp, LogOut, Star, Trophy, User } from 'lucide-react';
+import { CircleHelp, LogOut, Megaphone, Star, Trophy, User } from 'lucide-react';
 import { Button, Modal, Progress, message } from 'antd';
 import { useColecao } from '@/resources/hooks/useColecao';
 import { MASTER_ID, usePerfil } from '@/resources/hooks/usePerfil';
+import { ANUNCIO_ATUAL } from '@/resources/data/anuncios';
+import { ABRIR_ANUNCIOS_EVENTO } from '@/components/layout/AnnouncementsModal';
 
 export function Header() {
   const { total } = useColecao();
@@ -59,6 +61,35 @@ export function Header() {
             }}
           >
             {perfilAtual?.nome ?? 'Perfil'}
+          </div>
+          <div style={{ position: 'relative', display: 'inline-flex' }}>
+            <Button
+              type="text"
+              size="small"
+              aria-label="Novidades"
+              icon={<Megaphone size={15} color="#22c55e" />}
+              onClick={() =>
+                window.dispatchEvent(new Event(ABRIR_ANUNCIOS_EVENTO))
+              }
+            />
+            {ANUNCIO_ATUAL &&
+              perfilAtual &&
+              perfilAtual.ultimoAnuncioVisto !== ANUNCIO_ATUAL.id && (
+                <span
+                  aria-hidden
+                  style={{
+                    position: 'absolute',
+                    top: 2,
+                    right: 2,
+                    width: 8,
+                    height: 8,
+                    borderRadius: '50%',
+                    background: '#ef4444',
+                    border: '1px solid #0a1230',
+                    pointerEvents: 'none',
+                  }}
+                />
+              )}
           </div>
           <Button
             type="text"

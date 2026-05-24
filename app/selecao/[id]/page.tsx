@@ -3,7 +3,7 @@
 import { useParams, useRouter } from 'next/navigation';
 import { Button, Progress, Tabs } from 'antd';
 import { ArrowLeft } from 'lucide-react';
-import { SELECOES } from '@/resources/data/selecoes';
+import { SELECOES, formatarPaginas } from '@/resources/data/selecoes';
 import { figurinhasPorSelecao } from '@/resources/data/figurinhas';
 import { Sticker } from '@/components/sticker/Sticker';
 import { useColecao } from '@/resources/hooks/useColecao';
@@ -14,7 +14,8 @@ export default function SelecaoPage() {
   const { tem } = useColecao();
 
   const id = params?.id as string;
-  const selecao = SELECOES.find((s) => s.id === id);
+  const indiceSelecao = SELECOES.findIndex((s) => s.id === id);
+  const selecao = indiceSelecao === -1 ? undefined : SELECOES[indiceSelecao];
 
   if (!selecao) {
     return (
@@ -57,7 +58,7 @@ export default function SelecaoPage() {
               {selecao.nome} <span style={{ color: '#9aa6c9', fontWeight: 600, fontSize: 16 }}>({selecao.id})</span>
             </div>
             <div style={{ fontSize: 12, color: '#9aa6c9' }}>
-              {selecao.confederacao} • Grupo {selecao.grupo}
+              {selecao.confederacao} • Grupo {selecao.grupo} • #{indiceSelecao + 1} · pg {formatarPaginas(selecao)}
             </div>
           </div>
           <div style={{ textAlign: 'right' }}>

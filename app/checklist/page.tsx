@@ -1,30 +1,45 @@
 'use client';
 
-import { Button, Empty, Input, Radio, Select } from 'antd';
-import { History, Search } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { Button, Empty, Radio, Select, type RefSelectProps } from 'antd';
+import { History, Search, X } from 'lucide-react';
+import { useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { Header } from '@/components/layout/Header';
+import { SearchBar } from '@/components/layout/SearchBar';
 import { HistoricoModal } from '@/components/historico/HistoricoModal';
 import { Sticker } from '@/components/sticker/Sticker';
 import { FIGURINHAS } from '@/resources/data/figurinhas';
-import { SELECOES } from '@/resources/data/selecoes';
+import { SELECOES, formatarPaginas } from '@/resources/data/selecoes';
 import { useColecao } from '@/resources/hooks/useColecao';
 import { useHistorico } from '@/resources/hooks/useHistorico';
+import { usePersistedState } from '@/resources/hooks/usePersistedState';
 import type { Sticker as StickerType } from '@/resources/types';
 
 type FiltroStatus = 'todas' | 'tenho' | 'repetidas' | 'nao_tenho';
-type OrdemChecklist = 'grupos' | 'alfabetica' | 'completude';
+type OrdemChecklist = 'grupos' | 'alfabetica' | 'alfabetica-en' | 'completude';
+
+const semAcento = (s: string) =>
+  s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
 
 export default function ChecklistPage() {
   const { temSlot, duplicadasSlot } = useColecao();
   const { itens: historico } = useHistorico();
   const searchParams = useSearchParams();
   const [busca, setBusca] = useState(() => searchParams?.get('busca') ?? '');
-  const [paises, setPaises] = useState<string[]>([]);
-  const [status, setStatus] = useState<FiltroStatus>('todas');
-  const [ordem, setOrdem] = useState<OrdemChecklist>('grupos');
+  const [pais, setPais] = usePersistedState<string | null>(
+    'figurinhas:checklist:pais',
+    null
+  );
+  const [status, setStatus] = usePersistedState<FiltroStatus>(
+    'figurinhas:checklist:status',
+    'todas'
+  );
+  const [ordem, setOrdem] = usePersistedState<OrdemChecklist>(
+    'figurinhas:checklist:ordem',
+    'grupos'
+  );
   const [historicoAberto, setHistoricoAberto] = useState(false);
+  const paisesSelectRef = useRef<RefSelectProps>(null);
 
   const opcoesPaises = useMemo(
     () =>
@@ -36,24 +51,24 @@ export default function ChecklistPage() {
   );
 
   const lista = useMemo(() => {
-    const termo = busca.trim().toLowerCase().replace(/\s+/g, '');
+    const termo = semAcento(busca.trim().replace(/\s+/g, ''));
     const matchPrefixo = termo.match(/^([a-z]+)0*(\d+)$/i);
 
     return FIGURINHAS.filter((f) => {
       if (f.slotDeId) return false;
       if (termo) {
-        const cod = f.codigo.toLowerCase();
-        const nome = f.nome.toLowerCase();
+        const cod = semAcento(f.codigo);
+        const nome = semAcento(f.nome);
         let bate = cod.includes(termo) || nome.includes(termo);
         if (!bate && matchPrefixo) {
           const [, prefix, num] = matchPrefixo;
-          const codAlvo = `${prefix}${num.padStart(2, '0')}`.toLowerCase();
+          const codAlvo = semAcento(`${prefix}${num.padStart(2, '0')}`);
           if (cod === codAlvo) bate = true;
         }
         if (!bate) return false;
       }
 
-      if (paises.length > 0 && (!f.selecaoId || !paises.includes(f.selecaoId))) {
+      if (pais && f.selecaoId !== pais) {
         return false;
       }
 
@@ -63,7 +78,7 @@ export default function ChecklistPage() {
 
       return true;
     });
-  }, [busca, paises, status, temSlot, duplicadasSlot]);
+  }, [busca, pais, status, temSlot, duplicadasSlot]);
 
   return (
     <>
@@ -94,32 +109,57 @@ export default function ChecklistPage() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div>
             <label style={filterLabelStyle}>Busca rapida</label>
-            <Input
-              size="large"
-              allowClear
+            <SearchBar
               value={busca}
-              onChange={(e) => setBusca(e.target.value)}
+              onChange={setBusca}
               placeholder="Ex: BRA1, GER15, Messi..."
-              prefix={<Search size={16} color="#9aa6c9" />}
             />
           </div>
 
           <div>
             <label style={filterLabelStyle}>Paises</label>
-            <Select
-              mode="multiple"
-              allowClear
-              value={paises}
-              onChange={setPaises}
-              placeholder="Todas as selecoes"
-              options={opcoesPaises}
-              maxTagCount="responsive"
-              style={{ width: '100%' }}
-              size="large"
-              filterOption={(input, opt) =>
-                String(opt?.label ?? '').toLowerCase().includes(input.toLowerCase())
-              }
-            />
+            <div style={{ display: 'flex', gap: 6, alignItems: 'stretch' }}>
+              <Select
+                ref={paisesSelectRef}
+                showSearch
+                value={pais ?? undefined}
+                onChange={(valor) => {
+                  setPais(valor ?? null);
+                  paisesSelectRef.current?.blur();
+                }}
+                placeholder="Todas as selecoes"
+                options={opcoesPaises}
+                style={{ flex: 1, minWidth: 0 }}
+                size="large"
+                filterOption={(input, opt) =>
+                  semAcento(String(opt?.label ?? '')).includes(semAcento(input))
+                }
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (pais) setPais(null);
+                  paisesSelectRef.current?.blur();
+                }}
+                aria-label={pais ? 'Limpar pais selecionado' : 'Confirmar selecao'}
+                style={{
+                  minWidth: 48,
+                  padding: '0 14px',
+                  borderRadius: 8,
+                  border: 'none',
+                  cursor: 'pointer',
+                  background: pais ? '#dc2626' : '#16a34a',
+                  color: '#fff',
+                  fontWeight: 800,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  transition: 'background 0.15s ease',
+                }}
+              >
+                {pais ? <X size={20} /> : <Search size={20} />}
+              </button>
+            </div>
           </div>
 
           <div>
@@ -147,7 +187,8 @@ export default function ChecklistPage() {
               onChange={(e) => setOrdem(e.target.value)}
               options={[
                 { label: 'Grupos', value: 'grupos' },
-                { label: 'Alfabetica', value: 'alfabetica' },
+                { label: 'A-Z PT', value: 'alfabetica' },
+                { label: 'A-Z EN', value: 'alfabetica-en' },
                 { label: 'Completude', value: 'completude' },
               ]}
             />
@@ -198,6 +239,8 @@ function renderBlocos(
     selecoesOrdenadas.sort((a, b) =>
       a.nome.localeCompare(b.nome, 'pt-BR', { sensitivity: 'base' })
     );
+  } else if (ordem === 'alfabetica-en') {
+    selecoesOrdenadas.sort((a, b) => a.id.localeCompare(b.id, 'en'));
   } else if (ordem === 'completude') {
     selecoesOrdenadas.sort((a, b) => {
       const figsA = porSelecao.get(a.id) ?? [];
@@ -213,10 +256,12 @@ function renderBlocos(
     const figs = porSelecao.get(sel.id);
     if (!figs?.length) return;
     const prefixoGrupo = ordem === 'grupos' && sel.grupo ? `Grupo ${sel.grupo} · ` : '';
+    const numero = SELECOES.findIndex((s) => s.id === sel.id) + 1;
+    const sufixoEn = sel.nomeEn && sel.nomeEn !== sel.nome ? ` / ${sel.nomeEn}` : '';
     blocos.push(
       <GrupoFigurinhas
         key={sel.id}
-        titulo={`${prefixoGrupo}${sel.bandeira} ${sel.nome} (${sel.id})`}
+        titulo={`${prefixoGrupo}#${numero} · pg ${formatarPaginas(sel)} ${sel.bandeira} ${sel.nome}${sufixoEn} (${sel.id})`}
         cor={sel.cor}
         figs={figs}
         tem={tem}

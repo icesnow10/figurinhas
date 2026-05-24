@@ -6,7 +6,7 @@ import { Copy, Eye, Plus, Trash2 } from 'lucide-react';
 import { Header } from '@/components/layout/Header';
 import { useColecao } from '@/resources/hooks/useColecao';
 import { usePerfil } from '@/resources/hooks/usePerfil';
-import { FIGURINHAS } from '@/resources/data/figurinhas';
+import { FIGURINHAS, idsAlternativosDoSlot } from '@/resources/data/figurinhas';
 import { SELECOES } from '@/resources/data/selecoes';
 import type { ColecaoEstado, Sticker as StickerType } from '@/resources/types';
 
@@ -65,7 +65,8 @@ function faltamPorSelecao(colecao: ColecaoEstado): Record<string, number> {
   const mapa: Record<string, number> = {};
   FIGURINHAS.forEach((f) => {
     if (f.tipo !== 'selecao' || !f.selecaoId) return;
-    if (!temNoEstado(colecao, f.id)) {
+    if (f.slotDeId) return;
+    if (!temSlotNoEstado(colecao, f.id)) {
       mapa[f.selecaoId] = (mapa[f.selecaoId] ?? 0) + 1;
     }
   });
@@ -144,12 +145,27 @@ function temNoEstado(estado: ColecaoEstado, stickerId: string) {
   return (estado[stickerId] ?? 0) > 0;
 }
 
+function temSlotNoEstado(estado: ColecaoEstado, stickerId: string) {
+  return idsAlternativosDoSlot(stickerId).some((alt) => (estado[alt] ?? 0) > 0);
+}
+
+function quantidadeNoSlot(estado: ColecaoEstado, stickerId: string) {
+  return idsAlternativosDoSlot(stickerId).reduce(
+    (acc, alt) => acc + (estado[alt] ?? 0),
+    0
+  );
+}
+
 function duplicadasNoEstado(estado: ColecaoEstado, stickerId: string) {
   return Math.max(0, (estado[stickerId] ?? 0) - 1);
 }
 
+function duplicadasSlotNoEstado(estado: ColecaoEstado, stickerId: string) {
+  return Math.max(0, quantidadeNoSlot(estado, stickerId) - 1);
+}
+
 export default function TrocasPage() {
-  const { duplicadas, estado, tem, recarregar } = useColecao();
+  const { estado, recarregar } = useColecao();
   const { perfilId } = usePerfil();
   const [amigos, setAmigos] = useState<AmigoSalvo[]>([]);
   const [carregandoAmigos, setCarregandoAmigos] = useState(true);
@@ -188,8 +204,20 @@ export default function TrocasPage() {
 
   const meusFaltantesPorSelecao = useMemo(() => faltamPorSelecao(estado), [estado]);
 
-  const repetidas = FIGURINHAS.filter((f) => duplicadas(f.id) > 0);
-  const faltantes = FIGURINHAS.filter((f) => !tem(f.id));
+  const repetidas = FIGURINHAS.filter(
+    (f) => !f.slotDeId && duplicadasSlotNoEstado(estado, f.id) > 0
+  );
+  const repetidasExtras = repetidas.reduce(
+    (acc, f) => acc + duplicadasSlotNoEstado(estado, f.id),
+    0
+  );
+  const repetidasExtrasAlemDaPrimeira = Math.max(
+    0,
+    repetidasExtras - repetidas.length
+  );
+  const faltantes = FIGURINHAS.filter(
+    (f) => !f.slotDeId && !temSlotNoEstado(estado, f.id)
+  );
   const textoRepetidas = useMemo(() => formatarMensagem(repetidas), [repetidas]);
   const textoFaltantes = useMemo(
     () =>
@@ -494,7 +522,11 @@ export default function TrocasPage() {
               children: (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                   <MensagemWhatsApp
-                    titulo={`Repetidas (${repetidas.length})`}
+                    titulo={`Repetidas (${repetidas.length}${
+                      repetidasExtrasAlemDaPrimeira > 0
+                        ? ` +${repetidasExtrasAlemDaPrimeira} = ${repetidasExtras}`
+                        : ''
+                    })`}
                     texto={textoRepetidas}
                     onCopiar={() => copiarTexto(textoRepetidas)}
                   />

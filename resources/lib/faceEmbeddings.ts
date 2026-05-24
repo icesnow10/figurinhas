@@ -5,20 +5,56 @@ import type { DetectorModel, MatchConfig } from './faceTypes';
 import { MODELS_URL } from './faceConfig';
 
 let modelsLoadedFor: DetectorModel | null = null;
+let loadingPromise: Promise<void> | null = null;
+
+async function warmupInference(detector: DetectorModel): Promise<void> {
+  // First face-api inference compiles WebGL shaders, which can take 1–3s.
+  // Running it on a throwaway canvas during load means the user-facing first
+  // scan no longer pays that cost.
+  const canvas = document.createElement('canvas');
+  canvas.width = 224;
+  canvas.height = 224;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.fillStyle = '#888';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const opts =
+    detector === 'tiny_face_detector'
+      ? new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.4 })
+      : new faceapi.SsdMobilenetv1Options({ minConfidence: 0.4 });
+
+  try {
+    await faceapi
+      .detectSingleFace(canvas, opts as any)
+      .withFaceLandmarks()
+      .withFaceDescriptor();
+  } catch {
+    // Warmup falhar não deve impedir o uso real do scanner.
+  }
+}
 
 export async function loadModels(detector: DetectorModel): Promise<void> {
   if (modelsLoadedFor === detector) return;
+  if (loadingPromise) return loadingPromise;
 
-  await faceapi.nets.faceLandmark68Net.loadFromUri(MODELS_URL);
-  await faceapi.nets.faceRecognitionNet.loadFromUri(MODELS_URL);
+  loadingPromise = (async () => {
+    await faceapi.nets.faceLandmark68Net.loadFromUri(MODELS_URL);
+    await faceapi.nets.faceRecognitionNet.loadFromUri(MODELS_URL);
 
-  if (detector === 'tiny_face_detector') {
-    await faceapi.nets.tinyFaceDetector.loadFromUri(MODELS_URL);
-  } else {
-    await faceapi.nets.ssdMobilenetv1.loadFromUri(MODELS_URL);
-  }
+    if (detector === 'tiny_face_detector') {
+      await faceapi.nets.tinyFaceDetector.loadFromUri(MODELS_URL);
+    } else {
+      await faceapi.nets.ssdMobilenetv1.loadFromUri(MODELS_URL);
+    }
 
-  modelsLoadedFor = detector;
+    await warmupInference(detector);
+    modelsLoadedFor = detector;
+  })().finally(() => {
+    loadingPromise = null;
+  });
+
+  return loadingPromise;
 }
 
 function detectorOptions(cfg: MatchConfig): faceapi.TinyFaceDetectorOptions | faceapi.SsdMobilenetv1Options {

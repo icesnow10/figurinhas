@@ -1,7 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Modal, Input, Button, Segmented, Switch, message, notification, Progress } from 'antd';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+import { Modal, Input, Button, Collapse, Segmented, Switch, message, notification, Progress } from 'antd';
 import {
   RotateCw,
   X,
@@ -16,12 +22,21 @@ import {
   Bolt,
   Image as ImageIcon,
   Type,
+  Loader2,
+  PlusCircle,
 } from 'lucide-react';
-import { FIGURINHAS, figurinhaPorId, temVersaoMcDonalds } from '@/resources/data/figurinhas';
+import {
+  FIGURINHAS,
+  figurinhaPorId,
+  figurinhasPorSelecao,
+  temVersaoMcDonalds,
+} from '@/resources/data/figurinhas';
+import { SELECOES, formatarPaginas } from '@/resources/data/selecoes';
 import { useColecao } from '@/resources/hooks/useColecao';
 import { useHistorico } from '@/resources/hooks/useHistorico';
 import { usePerguntaMcd } from '@/resources/hooks/usePerguntaMcd';
 import { HistoricoModal } from '@/components/historico/HistoricoModal';
+import { Sticker as StickerView } from '@/components/sticker/Sticker';
 import type { Sticker } from '@/resources/types';
 import { SCANNER_CONFIG } from '@/resources/lib/faceConfig';
 import { findMatches, isConfidentMatch } from '@/resources/lib/faceMatcher';
@@ -74,11 +89,14 @@ const SCAN_DEBUG_KEY = 'figurinhas:scan:debug';
 const SCAN_TURBO_KEY = 'figurinhas:scan:turbo'; // legado, migrado para SCAN_MODE_KEY
 const SCAN_MODE_KEY = 'figurinhas:scan:mode';
 const SCAN_QUICK_KEY = 'figurinhas:scan:quickMode';
+const SCAN_USO_KEY = 'figurinhas:scan:modoUso';
 const SCAN_CAPTURA_KEY = 'figurinhas:scan:captura';
 const QUICK_DURATION_MS = 10_000;
+const TROCA_DURATION_MS = 6_000;
 const MAX_NOTIFICACOES_QUICK = 2;
 
 type ModoScan = 'turbo' | 'legacy';
+type ModoUso = 'normal' | 'quick' | 'troca';
 type ModoCaptura = 'foto' | 'codigo';
 
 function lerModoCaptura(): ModoCaptura {
@@ -149,6 +167,65 @@ function salvarCameraPreferida(facingMode: 'environment' | 'user') {
   } catch {}
 }
 
+function ToastSwipe({
+  onDismiss,
+  children,
+}: {
+  onDismiss: () => void;
+  children: ReactNode;
+}) {
+  const elRef = useRef<HTMLDivElement>(null);
+  const startRef = useRef<number | null>(null);
+  const deltaRef = useRef(0);
+  const dismissedRef = useRef(false);
+
+  const aplicar = () => {
+    if (!elRef.current) return;
+    const d = deltaRef.current;
+    elRef.current.style.transform = `translateX(${d}px)`;
+    elRef.current.style.opacity = String(1 - Math.min(0.6, Math.abs(d) / 220));
+  };
+
+  return (
+    <div
+      ref={elRef}
+      onTouchStart={(e) => {
+        if (dismissedRef.current) return;
+        startRef.current = e.touches[0].clientX;
+        if (elRef.current) elRef.current.style.transition = 'none';
+      }}
+      onTouchMove={(e) => {
+        if (startRef.current === null || dismissedRef.current) return;
+        deltaRef.current = e.touches[0].clientX - startRef.current;
+        aplicar();
+      }}
+      onTouchEnd={() => {
+        if (dismissedRef.current) return;
+        if (Math.abs(deltaRef.current) > 80) {
+          dismissedRef.current = true;
+          if (elRef.current) {
+            elRef.current.style.transition = 'transform 0.18s ease, opacity 0.18s ease';
+            const direcao = deltaRef.current > 0 ? 1 : -1;
+            deltaRef.current = direcao * 320;
+            aplicar();
+          }
+          window.setTimeout(onDismiss, 180);
+        } else {
+          deltaRef.current = 0;
+          if (elRef.current) {
+            elRef.current.style.transition = 'transform 0.18s ease, opacity 0.18s ease';
+          }
+          aplicar();
+        }
+        startRef.current = null;
+      }}
+      style={{ touchAction: 'pan-y' }}
+    >
+      {children}
+    </div>
+  );
+}
+
 export default function ScanPageClient() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -179,15 +256,20 @@ export default function ScanPageClient() {
   const [modalConfigAberto, setModalConfigAberto] = useState(false);
   const [flashAtivo, setFlashAtivo] = useState(false);
   const [flashSuportado, setFlashSuportado] = useState(false);
-  const [quickMode, setQuickMode] = useState(false);
+  const [modoUso, setModoUso] = useState<ModoUso>('normal');
   const [historicoAberto, setHistoricoAberto] = useState(false);
   const [notifApi, notifContext] = notification.useNotification();
-  const quickModeRef = useRef(false);
+  const modoUsoRef = useRef<ModoUso>('normal');
 
   useEffect(() => {
     try {
       setDebugAtivo(window.localStorage.getItem(SCAN_DEBUG_KEY) === '1');
-      setQuickMode(window.localStorage.getItem(SCAN_QUICK_KEY) === '1');
+      const salvoUso = window.localStorage.getItem(SCAN_USO_KEY);
+      if (salvoUso === 'normal' || salvoUso === 'quick' || salvoUso === 'troca') {
+        setModoUso(salvoUso);
+      } else if (window.localStorage.getItem(SCAN_QUICK_KEY) === '1') {
+        setModoUso('quick');
+      }
     } catch {}
     setModoScan(lerModoScan());
     setModoCaptura(lerModoCaptura());
@@ -217,11 +299,12 @@ export default function ScanPageClient() {
   }, [modoCaptura, faceProntos]);
 
   useEffect(() => {
-    quickModeRef.current = quickMode;
+    modoUsoRef.current = modoUso;
     try {
-      window.localStorage.setItem(SCAN_QUICK_KEY, quickMode ? '1' : '0');
+      window.localStorage.setItem(SCAN_USO_KEY, modoUso);
+      window.localStorage.setItem(SCAN_QUICK_KEY, modoUso === 'quick' ? '1' : '0');
     } catch {}
-  }, [quickMode]);
+  }, [modoUso]);
 
   const turboAtivo = modoScan === 'turbo';
 
@@ -246,6 +329,33 @@ export default function ScanPageClient() {
   } = useColecao();
   const { adicionar: registrarHistorico, remover: removerHistorico } = useHistorico();
   const { perguntar: perguntarMcd } = usePerguntaMcd();
+
+  const verificarSelecaoCompleta = useCallback(
+    (selecaoId: string | undefined) => {
+      if (!selecaoId) return null;
+      const sel = SELECOES.find((s) => s.id === selecaoId);
+      if (!sel) return null;
+      const figs = figurinhasPorSelecao(selecaoId);
+      if (!figs.length) return null;
+      const completa = figs.every((f) => temSlot(f.id));
+      return { selecao: sel, completa };
+    },
+    [temSlot]
+  );
+
+  const projetarSelecaoCompleta = useCallback(
+    (sticker: Sticker | undefined) => {
+      if (!sticker?.selecaoId) return null;
+      const sel = SELECOES.find((s) => s.id === sticker.selecaoId);
+      if (!sel) return null;
+      const figs = figurinhasPorSelecao(sticker.selecaoId);
+      if (!figs.length) return null;
+      const slotCanonico = sticker.slotDeId ?? sticker.id;
+      const completa = figs.every((f) => f.id === slotCanonico || temSlot(f.id));
+      return { selecao: sel, completa };
+    },
+    [temSlot]
+  );
   const quickOrigemRef = useRef<{ stickerId: string; timestamp: number } | null>(null);
   const handlerStickerDetectadoRef = useRef<(sticker: Sticker) => void>(() => {});
   const notificacoesAtivasRef = useRef<{ chave: string; intervaloId: number }[]>([]);
@@ -257,88 +367,104 @@ export default function ScanPageClient() {
       const tickInicial = 100;
       let percent = tickInicial;
 
+      const infoSelecao = projetarSelecaoCompleta(sticker);
       const corPrincipal = jaTinha ? '#f59e0b' : '#22c55e';
       const corProgresso = jaTinha ? '#f59e0b' : '#22c55e';
       const fundoCard = jaTinha ? 'rgba(245,158,11,0.10)' : '#0a1230';
       const bordaCard = jaTinha ? '1px solid rgba(245,158,11,0.55)' : '1px solid #2a3654';
 
       const renderConteudo = (pct: number) => (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            cursor: 'pointer',
-          }}
-        >
+        <ToastSwipe onDismiss={() => finalizar()}>
           <div
+            onClick={aoClicar}
             style={{
-              width: 44,
-              height: 60,
-              borderRadius: 6,
-              overflow: 'hidden',
-              border: `2px solid ${corPrincipal}`,
-              background: '#1a2236',
-              flexShrink: 0,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              cursor: 'pointer',
             }}
           >
-            <img
-              src={sticker.imagem}
-              alt={sticker.codigo}
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-            />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
             <div
               style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                color: '#fff',
-                fontWeight: 800,
-                fontSize: 14,
+                width: 44,
+                height: 60,
+                borderRadius: 6,
+                overflow: 'hidden',
+                border: `2px solid ${corPrincipal}`,
+                background: '#1a2236',
+                flexShrink: 0,
               }}
             >
-              {jaTinha && (
-                <span
+              <img
+                src={sticker.imagem}
+                alt={sticker.codigo}
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+              />
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  color: '#fff',
+                  fontWeight: 800,
+                  fontSize: 14,
+                }}
+              >
+                {jaTinha && (
+                  <span
+                    style={{
+                      fontSize: 10,
+                      background: '#f59e0b',
+                      color: '#0a1230',
+                      padding: '2px 6px',
+                      borderRadius: 4,
+                      fontWeight: 800,
+                      letterSpacing: 0.4,
+                    }}
+                  >
+                    DUPLICADA
+                  </span>
+                )}
+                <span>{sticker.codigo}</span>
+                <span style={{ color: corPrincipal, fontWeight: 700 }}>
+                  {jaTinha ? `· ${qtdAtual}ª cópia` : '· adicionada!'}
+                </span>
+              </div>
+              <div
+                style={{
+                  color: '#9aa6c9',
+                  fontSize: 11,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  marginBottom: 4,
+                }}
+              >
+                {sticker.nome} — toque para editar
+              </div>
+              {infoSelecao?.completa && (
+                <div
                   style={{
-                    fontSize: 10,
-                    background: '#f59e0b',
-                    color: '#0a1230',
-                    padding: '2px 6px',
-                    borderRadius: 4,
-                    fontWeight: 800,
-                    letterSpacing: 0.4,
+                    color: '#22c55e',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    marginBottom: 4,
                   }}
                 >
-                  DUPLICADA
-                </span>
+                  ✅ Seleção {infoSelecao.selecao.nome} completa!
+                </div>
               )}
-              <span>{sticker.codigo}</span>
-              <span style={{ color: corPrincipal, fontWeight: 700 }}>
-                {jaTinha ? `· ${qtdAtual}ª cópia` : '· adicionada!'}
-              </span>
+              <Progress
+                percent={pct}
+                size="small"
+                showInfo={false}
+                strokeColor={corProgresso}
+              />
             </div>
-            <div
-              style={{
-                color: '#9aa6c9',
-                fontSize: 11,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-                marginBottom: 4,
-              }}
-            >
-              {sticker.nome} — toque para editar
-            </div>
-            <Progress
-              percent={pct}
-              size="small"
-              showInfo={false}
-              strokeColor={corProgresso}
-            />
           </div>
-        </div>
+        </ToastSwipe>
       );
 
       while (notificacoesAtivasRef.current.length >= MAX_NOTIFICACOES_QUICK) {
@@ -380,9 +506,9 @@ export default function ScanPageClient() {
           description: renderConteudo(percent),
           placement: 'bottomRight',
           duration: 0,
-          closeIcon: null,
+          closeIcon: <X size={14} color="#9aa6c9" />,
+          onClose: finalizar,
           style: { padding: 10, background: fundoCard, border: bordaCard },
-          onClick: aoClicar,
         });
       }, 100);
 
@@ -394,12 +520,233 @@ export default function ScanPageClient() {
         description: renderConteudo(tickInicial),
         placement: 'bottomRight',
         duration: 0,
-        closeIcon: null,
+        closeIcon: <X size={14} color="#9aa6c9" />,
+        onClose: finalizar,
         style: { padding: 10, background: fundoCard, border: bordaCard },
-        onClick: aoClicar,
       });
     },
-    [notifApi]
+    [notifApi, projetarSelecaoCompleta]
+  );
+
+  const dispararTrocaToast = useCallback(
+    (sticker: Sticker, jaTinha: boolean, qtdAtual: number) => {
+      const chave = `troca-${sticker.id}-${Date.now()}`;
+      const infoSelecao = verificarSelecaoCompleta(sticker.selecaoId);
+      const selecaoCompleta = !!infoSelecao?.completa;
+
+      const corPrincipal = selecaoCompleta
+        ? '#f59e0b'
+        : jaTinha
+        ? '#f59e0b'
+        : '#22c55e';
+      const fundoCard = selecaoCompleta
+        ? 'rgba(245,158,11,0.10)'
+        : jaTinha
+        ? 'rgba(245,158,11,0.10)'
+        : 'rgba(34,197,94,0.10)';
+      const bordaCard = selecaoCompleta
+        ? '1px solid rgba(245,158,11,0.55)'
+        : jaTinha
+        ? '1px solid rgba(245,158,11,0.55)'
+        : '1px solid rgba(34,197,94,0.55)';
+
+      let restante = TROCA_DURATION_MS;
+      let percent = 100;
+      let intervaloId: number | null = null;
+
+      const finalizar = () => {
+        if (intervaloId !== null) {
+          window.clearInterval(intervaloId);
+          intervaloId = null;
+        }
+        notifApi.destroy(chave);
+      };
+
+      const conteudoCompleta = (sel: NonNullable<typeof infoSelecao>['selecao'], pct: number) => (
+        <ToastSwipe onDismiss={finalizar}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ fontSize: 36, lineHeight: 1, flexShrink: 0 }}>{sel.bandeira}</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  color: '#fff',
+                  fontWeight: 800,
+                  fontSize: 14,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 10,
+                    background: '#f59e0b',
+                    color: '#0a1230',
+                    padding: '2px 6px',
+                    borderRadius: 4,
+                    fontWeight: 800,
+                    letterSpacing: 0.4,
+                  }}
+                >
+                  SELEÇÃO COMPLETA
+                </span>
+                <span>{sel.id}</span>
+              </div>
+              <div style={{ color: '#fff', fontSize: 13, fontWeight: 700, marginTop: 2 }}>
+                {sel.nome}{' '}
+                <span style={{ color: '#9aa6c9', fontWeight: 600, fontSize: 11 }}>
+                  #{SELECOES.findIndex((x) => x.id === sel.id) + 1} · pg {formatarPaginas(sel)}
+                </span>
+              </div>
+              <div
+                style={{
+                  color: '#f59e0b',
+                  fontSize: 11,
+                  fontWeight: 700,
+                  marginTop: 2,
+                  marginBottom: 4,
+                }}
+              >
+                Não precisa de figurinhas dessa seleção
+              </div>
+              <Progress percent={pct} size="small" showInfo={false} strokeColor="#f59e0b" />
+            </div>
+          </div>
+        </ToastSwipe>
+      );
+
+      const titulo = jaTinha ? 'Já tem' : 'Precisa!';
+      const selecaoSticker = sticker.selecaoId
+        ? SELECOES.find((s) => s.id === sticker.selecaoId)
+        : undefined;
+      const paginasSticker = selecaoSticker ? formatarPaginas(selecaoSticker) : null;
+      const numeroSelecaoSticker = selecaoSticker
+        ? SELECOES.findIndex((s) => s.id === selecaoSticker.id) + 1
+        : null;
+      const subtitulo = jaTinha
+        ? qtdAtual > 1
+          ? `${qtdAtual - 1} repetida${qtdAtual - 1 > 1 ? 's' : ''} dessa`
+          : '1 cópia na coleção'
+        : 'Slot vazio na sua coleção';
+
+      const conteudoPadrao = (pct: number) => (
+        <ToastSwipe onDismiss={finalizar}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div
+              style={{
+                width: 44,
+                height: 60,
+                borderRadius: 6,
+                overflow: 'hidden',
+                border: `2px solid ${corPrincipal}`,
+                background: '#1a2236',
+                flexShrink: 0,
+              }}
+            >
+              <img
+                src={sticker.imagem}
+                alt={sticker.codigo}
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+              />
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  color: '#fff',
+                  fontWeight: 800,
+                  fontSize: 14,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 10,
+                    background: corPrincipal,
+                    color: '#0a1230',
+                    padding: '2px 6px',
+                    borderRadius: 4,
+                    fontWeight: 800,
+                    letterSpacing: 0.4,
+                  }}
+                >
+                  {titulo.toUpperCase()}
+                </span>
+                <span>{sticker.codigo}</span>
+                {paginasSticker ? (
+                  <span
+                    style={{
+                      fontSize: 10,
+                      color: '#9aa6c9',
+                      fontWeight: 700,
+                      background: 'rgba(255,255,255,0.08)',
+                      padding: '2px 6px',
+                      borderRadius: 4,
+                    }}
+                  >
+                    #{numeroSelecaoSticker} · pg {paginasSticker}
+                  </span>
+                ) : null}
+              </div>
+              <div
+                style={{
+                  color: '#9aa6c9',
+                  fontSize: 11,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  marginTop: 2,
+                }}
+              >
+                {sticker.nome}
+              </div>
+              <div
+                style={{
+                  color: corPrincipal,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  marginTop: 2,
+                  marginBottom: 4,
+                }}
+              >
+                {subtitulo}
+              </div>
+              <Progress percent={pct} size="small" showInfo={false} strokeColor={corPrincipal} />
+            </div>
+          </div>
+        </ToastSwipe>
+      );
+
+      const renderConteudo = (pct: number) =>
+        selecaoCompleta && infoSelecao
+          ? conteudoCompleta(infoSelecao.selecao, pct)
+          : conteudoPadrao(pct);
+
+      const abrir = (pct: number) =>
+        notifApi.open({
+          key: chave,
+          message: null,
+          duration: 0,
+          placement: 'bottomRight',
+          style: { padding: 10, background: fundoCard, border: bordaCard },
+          closeIcon: <X size={14} color="#9aa6c9" />,
+          onClose: finalizar,
+          description: renderConteudo(pct),
+        });
+
+      abrir(percent);
+      intervaloId = window.setInterval(() => {
+        restante -= 100;
+        percent = Math.max(0, (restante / TROCA_DURATION_MS) * 100);
+        if (restante <= 0) {
+          finalizar();
+          return;
+        }
+        abrir(percent);
+      }, 100);
+    },
+    [notifApi, verificarSelecaoCompleta]
   );
 
   // Inicia câmera
@@ -546,12 +893,27 @@ export default function ScanPageClient() {
         dispararQuickToast(figEscolhida, jaTinha, qtdDepois);
       };
 
+      if (modoUsoRef.current === 'troca') {
+        const jaTinha = temSlot(sticker.id);
+        const qtd = quantidadeSlot(sticker.id);
+        dispararTrocaToast(sticker, jaTinha, qtd);
+        pausadoRef.current = true;
+        if (cooldownTimeoutRef.current) {
+          window.clearTimeout(cooldownTimeoutRef.current);
+        }
+        cooldownTimeoutRef.current = window.setTimeout(() => {
+          pausadoRef.current = false;
+          cooldownTimeoutRef.current = null;
+        }, 1500);
+        return;
+      }
+
       if (temVersaoMcDonalds(sticker.id)) {
         pausadoRef.current = true;
         perguntarMcd(
           sticker.id,
           (idEscolhido) => {
-            if (quickModeRef.current) {
+            if (modoUsoRef.current === 'quick') {
               adicionarFinal(idEscolhido);
               if (cooldownTimeoutRef.current) {
                 window.clearTimeout(cooldownTimeoutRef.current);
@@ -573,7 +935,7 @@ export default function ScanPageClient() {
         return;
       }
 
-      if (quickModeRef.current) {
+      if (modoUsoRef.current === 'quick') {
         adicionarFinal(sticker.id);
         pausadoRef.current = true;
         if (cooldownTimeoutRef.current) {
@@ -593,6 +955,7 @@ export default function ScanPageClient() {
   }, [
     adicionar,
     dispararQuickToast,
+    dispararTrocaToast,
     perguntarMcd,
     quantidadeSlot,
     registrarHistorico,
@@ -699,6 +1062,11 @@ export default function ScanPageClient() {
       ? Math.max(0, quantidadeSlot(fig.id) - 2)
       : duplicadasSlot(fig.id)
     : 0;
+  const infoSelecaoModal = fig
+    ? fromQuick
+      ? verificarSelecaoCompleta(fig.selecaoId)
+      : projetarSelecaoCompleta(fig)
+    : null;
 
   const limparEstadoScan = useCallback(() => {
     setUltimoTexto('');
@@ -817,6 +1185,81 @@ export default function ScanPageClient() {
       }}
     >
       {notifContext}
+      {modoCaptura === 'foto' && !faceProntos && !cameraErro && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 50,
+            background: 'rgba(5,8,20,0.78)',
+            backdropFilter: 'blur(6px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 24,
+          }}
+        >
+          <div
+            style={{
+              background: '#0a1230',
+              border: '1px solid #2a3654',
+              borderRadius: 16,
+              padding: '24px 22px',
+              maxWidth: 320,
+              width: '100%',
+              textAlign: 'center',
+              boxShadow: '0 12px 32px rgba(0,0,0,0.5)',
+            }}
+          >
+            <div
+              style={{
+                width: 56,
+                height: 56,
+                margin: '0 auto 14px',
+                borderRadius: '50%',
+                background: 'rgba(34,197,94,0.12)',
+                border: '1px solid rgba(34,197,94,0.35)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#22c55e',
+                animation: 'scanSpin 1.1s linear infinite',
+              }}
+            >
+              <Loader2 size={26} />
+            </div>
+            <div
+              style={{
+                color: '#fff',
+                fontWeight: 800,
+                fontSize: 16,
+                marginBottom: 6,
+              }}
+            >
+              Preparando reconhecimento facial
+            </div>
+            <div
+              style={{
+                color: '#9aa6c9',
+                fontSize: 12,
+                lineHeight: 1.5,
+                marginBottom: 16,
+                animation: 'scanPulse 1.4s ease-in-out infinite',
+              }}
+            >
+              Baixando o modelo neural na primeira vez. Demora alguns segundos — depois fica em cache.
+            </div>
+            <Button
+              size="small"
+              onClick={() => setModoCaptura('codigo')}
+              icon={<Type size={14} />}
+              style={{ background: 'transparent', borderColor: '#2a3654', color: '#9aa6c9' }}
+            >
+              Usar leitura por código enquanto carrega
+            </Button>
+          </div>
+        </div>
+      )}
       {cameraErro ? (
         <div
           style={{
@@ -889,6 +1332,13 @@ export default function ScanPageClient() {
           0% { transform: translateY(0); opacity: 0.2; }
           50% { opacity: 1; }
           100% { transform: translateY(100%); opacity: 0.2; }
+        }
+        @keyframes scanSpin {
+          to { transform: rotate(360deg); }
+        }
+        @keyframes scanPulse {
+          0%, 100% { opacity: 0.55; }
+          50% { opacity: 1; }
         }
       `}</style>
 
@@ -1305,54 +1755,64 @@ export default function ScanPageClient() {
       <canvas ref={canvasRef} style={{ display: 'none' }} />
 
       <div
+        className="scan-mode-toggle"
         style={{
           position: 'absolute',
           left: 12,
           right: 12,
           bottom: 18,
           display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 12,
+          flexDirection: 'column',
+          gap: 6,
           padding: '10px 14px',
-          background: 'rgba(10,18,48,0.85)',
-          border: '1px solid rgba(255,255,255,0.1)',
-          borderRadius: 14,
-          backdropFilter: 'blur(8px)',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-          <div
-            style={{
-              width: 32,
-              height: 32,
-              borderRadius: 8,
-              background: quickMode ? '#22c55e' : 'rgba(255,255,255,0.08)',
-              color: quickMode ? '#0a1230' : '#9aa6c9',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              flexShrink: 0,
-            }}
-          >
-            <Bolt size={16} />
-          </div>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ color: '#fff', fontWeight: 800, fontSize: 13 }}>Quick mode</div>
-            <div
-              style={{
-                color: '#9aa6c9',
-                fontSize: 11,
-                whiteSpace: 'nowrap',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-              }}
-            >
-              Salva no ato; toque na notificação p/ editar.
-            </div>
-          </div>
+        <Segmented<ModoUso>
+          value={modoUso}
+          onChange={(v) => setModoUso(v)}
+          block
+          options={[
+            {
+              label: (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <Check size={13} /> Adicionar
+                </span>
+              ),
+              value: 'normal' as ModoUso,
+            },
+            {
+              label: (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <ScanLine size={13} /> Conferir
+                </span>
+              ),
+              value: 'troca' as ModoUso,
+            },
+            {
+              label: (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <PlusCircle size={13} /> Rápido
+                </span>
+              ),
+              value: 'quick' as ModoUso,
+            },
+          ]}
+        />
+        <div
+          style={{
+            color: '#9aa6c9',
+            fontSize: 11,
+            lineHeight: 1.4,
+            textAlign: 'center',
+          }}
+        >
+          {modoUso === 'normal' &&
+            'Confirma antes de adicionar à coleção.'}
+          {modoUso === 'troca' &&
+            'Só confere se você precisa ou já tem, sem salvar.'}
+          {modoUso === 'quick' &&
+            'Adicionar Rápido — adiciona na hora, toque na notificação se quiser editar.'}
         </div>
-        <Switch checked={quickMode} onChange={setQuickMode} />
       </div>
 
       <HistoricoModal aberto={historicoAberto} onFechar={() => setHistoricoAberto(false)} />
@@ -1486,8 +1946,48 @@ export default function ScanPageClient() {
                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                 />
               </div>
-              <div style={{ color: '#fff', fontSize: 22, fontWeight: 800 }}>{fig.codigo}</div>
+              <div style={{ color: '#fff', fontSize: 22, fontWeight: 800 }}>
+                {fig.codigo}
+                {(() => {
+                  if (!fig.selecaoId) return null;
+                  const idx = SELECOES.findIndex((s) => s.id === fig.selecaoId);
+                  if (idx === -1) return null;
+                  const sel = SELECOES[idx];
+                  return (
+                    <span
+                      style={{
+                        marginLeft: 8,
+                        fontSize: 12,
+                        color: '#9aa6c9',
+                        fontWeight: 700,
+                        background: 'rgba(255,255,255,0.06)',
+                        padding: '3px 8px',
+                        borderRadius: 6,
+                        verticalAlign: 'middle',
+                      }}
+                    >
+                      #{idx + 1} · pg {formatarPaginas(sel)}
+                    </span>
+                  );
+                })()}
+              </div>
               <div style={{ color: '#9aa6c9', fontSize: 13, marginBottom: 10 }}>{fig.nome}</div>
+              {infoSelecaoModal?.completa && (
+                <div
+                  style={{
+                    background: 'rgba(34,197,94,0.15)',
+                    border: '1px solid rgba(34,197,94,0.45)',
+                    color: '#bbf7d0',
+                    borderRadius: 10,
+                    padding: '8px 12px',
+                    fontSize: 13,
+                    fontWeight: 700,
+                    marginBottom: 8,
+                  }}
+                >
+                  ✅ Seleção {infoSelecaoModal.selecao.nome} completa
+                </div>
+              )}
               {jaTem && (
                 <div
                   style={{
@@ -1505,6 +2005,62 @@ export default function ScanPageClient() {
                   {dupes > 0 ? ` (${dupes} repetida${dupes > 1 ? 's' : ''})` : ''}
                 </div>
               )}
+              {fig.selecaoId && infoSelecaoModal && !infoSelecaoModal.completa && (() => {
+                const todas = figurinhasPorSelecao(fig.selecaoId);
+                const faltam = todas.filter((s) => !temSlot(s.id));
+                if (!faltam.length) return null;
+                return (
+                  <Collapse
+                    ghost
+                    style={{ marginBottom: 12, textAlign: 'left' }}
+                    items={[
+                      {
+                        key: 'faltantes',
+                        label: (
+                          <div
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              gap: 8,
+                            }}
+                          >
+                            <span style={{ color: '#fff', fontSize: 12, fontWeight: 700 }}>
+                              Faltam em {infoSelecaoModal.selecao.bandeira}{' '}
+                              {infoSelecaoModal.selecao.nome}
+                            </span>
+                            <span
+                              style={{
+                                color: '#9aa6c9',
+                                fontSize: 11,
+                                fontWeight: 700,
+                                background: 'rgba(255,255,255,0.06)',
+                                padding: '2px 8px',
+                                borderRadius: 10,
+                              }}
+                            >
+                              {faltam.length}/{todas.length}
+                            </span>
+                          </div>
+                        ),
+                        children: (
+                          <div
+                            style={{
+                              display: 'grid',
+                              gridTemplateColumns: 'repeat(5, 1fr)',
+                              gap: 6,
+                            }}
+                          >
+                            {faltam.map((s) => (
+                              <StickerView key={s.id} sticker={s} size={56} />
+                            ))}
+                          </div>
+                        ),
+                      },
+                    ]}
+                  />
+                );
+              })()}
             </>
           ) : (
             <>
@@ -1541,29 +2097,33 @@ export default function ScanPageClient() {
             />
           </div>
 
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 10 }}>
             <Button
+              size="large"
               onClick={() => {
                 fecharModal();
               }}
-              icon={<X size={16} />}
-              style={{ flex: 1 }}
+              icon={<X size={20} />}
+              style={{ flex: 1, height: 52, fontSize: 16, fontWeight: 700 }}
             >
               Cancelar
             </Button>
             <Button
+              size="large"
               type="primary"
               onClick={confirmar}
-              icon={<Check size={16} />}
+              icon={<Check size={20} />}
               disabled={!fig}
               style={{
                 flex: 1,
+                height: 52,
+                fontSize: 16,
                 background: jaTem ? '#f59e0b' : '#22c55e',
                 borderColor: jaTem ? '#f59e0b' : '#22c55e',
                 fontWeight: 700,
               }}
             >
-              {jaTem ? 'Repetida' : 'Confirmar'}
+              {jaTem ? 'Repetida' : 'Adicionar'}
             </Button>
           </div>
         </div>

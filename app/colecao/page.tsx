@@ -1,10 +1,11 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Button, Input, Radio, Tabs } from 'antd';
+import { Button, Radio, Tabs } from 'antd';
 import { useSearchParams } from 'next/navigation';
-import { Minus, Plus, Search } from 'lucide-react';
+import { Minus, Plus } from 'lucide-react';
 import { Header } from '@/components/layout/Header';
+import { SearchBar } from '@/components/layout/SearchBar';
 import {
   AlbumPorGrupos,
   type DirecaoOrdem,
@@ -18,9 +19,12 @@ import { Sticker } from '@/components/sticker/Sticker';
 import { figurinhasEspeciais } from '@/resources/data/figurinhas';
 import { CONFEDERACOES, SELECOES } from '@/resources/data/selecoes';
 import { useColecao } from '@/resources/hooks/useColecao';
+import { usePersistedState } from '@/resources/hooks/usePersistedState';
 
 const DENSIDADE_KEY = 'figurinhas:colecao:densidade';
 const DENSIDADES: DensidadeCard[] = ['pequeno', 'medio', 'grande'];
+const semAcento = (s: string) =>
+  s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
 const ROTULOS_DENSIDADE: Record<DensidadeCard, string> = {
   pequeno: 'Pequeno',
   medio: 'Medio',
@@ -34,9 +38,18 @@ export default function ColecaoPage() {
   const [abaAtiva, setAbaAtiva] = useState(() =>
     searchParams?.get('tab') === 'confederacoes' ? 'confederacoes' : 'paises'
   );
-  const [ordem, setOrdem] = useState<OrdemPaises>('grupos');
-  const [direcao, setDirecao] = useState<DirecaoOrdem>('asc');
-  const [completude, setCompletude] = useState<FiltroCompletude>('todas');
+  const [ordem, setOrdem] = usePersistedState<OrdemPaises>(
+    'figurinhas:colecao:ordem',
+    'grupos'
+  );
+  const [direcao, setDirecao] = usePersistedState<DirecaoOrdem>(
+    'figurinhas:colecao:direcao',
+    'asc'
+  );
+  const [completude, setCompletude] = usePersistedState<FiltroCompletude>(
+    'figurinhas:colecao:completude',
+    'todas'
+  );
   const [densidade, setDensidade] = useState<DensidadeCard>('pequeno');
   const especiais = figurinhasEspeciais();
 
@@ -57,18 +70,19 @@ export default function ColecaoPage() {
   const idx = DENSIDADES.indexOf(densidade);
   const aumentar = () => idx < DENSIDADES.length - 1 && trocarDensidade(DENSIDADES[idx + 1]);
   const diminuir = () => idx > 0 && trocarDensidade(DENSIDADES[idx - 1]);
-  const termoConfederacao = busca.trim().toLowerCase();
+  const termoConfederacao = semAcento(busca.trim());
   const confederacoesComSelecoes = CONFEDERACOES.map((c) => {
     const confBate =
       !termoConfederacao ||
-      c.id.toLowerCase().includes(termoConfederacao) ||
-      c.nome.toLowerCase().includes(termoConfederacao);
+      semAcento(c.id).includes(termoConfederacao) ||
+      semAcento(c.nome).includes(termoConfederacao);
     const selecoes = SELECOES.filter((s) => {
       if (s.confederacao !== c.id) return false;
       if (confBate) return true;
       return (
-        s.id.toLowerCase().includes(termoConfederacao) ||
-        s.nome.toLowerCase().includes(termoConfederacao)
+        semAcento(s.id).includes(termoConfederacao) ||
+        semAcento(s.nome).includes(termoConfederacao) ||
+        semAcento(s.nomeEn).includes(termoConfederacao)
       );
     });
     return { ...c, selecoes };
@@ -78,12 +92,10 @@ export default function ColecaoPage() {
     <>
       <Header />
       <div className="app-content">
-        <Input
-          size="large"
-          placeholder="Buscar pais ou codigo (BRA, GER, ...)"
-          prefix={<Search size={16} color="#9aa6c9" />}
+        <SearchBar
           value={busca}
-          onChange={(e) => setBusca(e.target.value)}
+          onChange={setBusca}
+          placeholder="Buscar pais ou codigo (BRA, GER, ...)"
           style={{ marginBottom: 8 }}
         />
 
@@ -116,7 +128,8 @@ export default function ColecaoPage() {
                       onChange={(e) => setOrdem(e.target.value)}
                       options={[
                         { label: 'Grupos', value: 'grupos' },
-                        { label: 'Alfabetica', value: 'alfabetica' },
+                        { label: 'A-Z PT', value: 'alfabetica' },
+                        { label: 'A-Z EN', value: 'alfabetica-en' },
                         { label: 'Completude', value: 'completude' },
                       ]}
                     />
