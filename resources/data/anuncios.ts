@@ -136,6 +136,31 @@ export const ANUNCIOS: Anuncio[] = [
       },
     ],
   },
+  {
+    id: '2026-05-25-checklist-mcd-snapshot',
+    titulo: 'Novidades',
+    data: '2026-05-25',
+    itens: [
+      {
+        emoji: '🍟',
+        titulo: 'McDonald\'s #13 conta como slot completo',
+        descricao:
+          'Na página da seleção e no gráfico de Completude da Home, ter a variante McDonald\'s do #13 já preenche o slot do país. Quem só tem a McD agora vê 20/20.',
+      },
+      {
+        emoji: '🏁',
+        titulo: 'País completo aparece no filtro "Não tenho"',
+        descricao:
+          'No Checklist, países sem faltantes não somem mais quando o filtro "Não tenho" está ativo — o cabeçalho aparece com badge Completo, mostrando bandeira, nome e número.',
+      },
+      {
+        emoji: '📌',
+        titulo: 'Figurinha marcada como tenho não desaparece da lista',
+        descricao:
+          'No Checklist, marcar uma figurinha como conseguida não a remove da visão atual. Buscar, ordenar e trocar de página também mantêm a lista estável. Só ao trocar o filtro ou o país a lista é recalculada.',
+      },
+    ],
+  },
 ];
 
 export const ANUNCIO_ATUAL: Anuncio | null = ANUNCIOS[ANUNCIOS.length - 1] ?? null;

@@ -11,7 +11,7 @@ import { useColecao } from '@/resources/hooks/useColecao';
 export default function SelecaoPage() {
   const params = useParams();
   const router = useRouter();
-  const { tem } = useColecao();
+  const { temSlot } = useColecao();
 
   const id = params?.id as string;
   const indiceSelecao = SELECOES.findIndex((s) => s.id === id);
@@ -29,7 +29,7 @@ export default function SelecaoPage() {
   }
 
   const figs = figurinhasPorSelecao(selecao.id);
-  const coletadas = figs.filter((f) => tem(f.id)).length;
+  const coletadas = figs.filter((f) => temSlot(f.id)).length;
   const pct = (coletadas / figs.length) * 100;
 
   return (
@@ -109,7 +109,7 @@ export default function SelecaoPage() {
                   marginTop: 8,
                 }}
               >
-                {figs.filter((f) => !tem(f.id)).map((s) => (
+                {figs.filter((f) => !temSlot(f.id)).map((s) => (
                   <Sticker key={s.id} sticker={s} size={78} />
                 ))}
               </div>

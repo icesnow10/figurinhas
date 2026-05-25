@@ -2,7 +2,7 @@
 
 import { Button, Empty, Radio, Select, type RefSelectProps } from 'antd';
 import { History, Search, X } from 'lucide-react';
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { Header } from '@/components/layout/Header';
 import { SearchBar } from '@/components/layout/SearchBar';
@@ -41,6 +41,43 @@ export default function ChecklistPage() {
   const [historicoAberto, setHistoricoAberto] = useState(false);
   const paisesSelectRef = useRef<RefSelectProps>(null);
 
+  // Snapshot persistido dos IDs que casam com o filtro atual. Só é recalculado
+  // quando `status` ou `pais` mudam — assim, marcar/desmarcar uma figurinha não
+  // a remove da visão atual. Navegar entre páginas, ordenar ou buscar também
+  // não invalida o snapshot.
+  type Snapshot = { key: string; ids: string[] };
+  const [snapshot, setSnapshot] = usePersistedState<Snapshot | null>(
+    'figurinhas:checklist:snapshot',
+    null
+  );
+  const temSlotRef = useRef(temSlot);
+  const duplicadasSlotRef = useRef(duplicadasSlot);
+  useEffect(() => {
+    temSlotRef.current = temSlot;
+    duplicadasSlotRef.current = duplicadasSlot;
+  });
+
+  const snapshotKey = `${status}|${pais ?? ''}`;
+  useEffect(() => {
+    if (status === 'todas') {
+      if (snapshot !== null) setSnapshot(null);
+      return;
+    }
+    if (snapshot?.key === snapshotKey) return;
+    const tem = temSlotRef.current;
+    const dup = duplicadasSlotRef.current;
+    const ids = FIGURINHAS.filter((f) => {
+      if (f.slotDeId) return false;
+      if (pais && f.selecaoId !== pais) return false;
+      if (status === 'tenho' && !tem(f.id)) return false;
+      if (status === 'repetidas' && dup(f.id) <= 0) return false;
+      if (status === 'nao_tenho' && tem(f.id)) return false;
+      return true;
+    }).map((f) => f.id);
+    setSnapshot({ key: snapshotKey, ids });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshotKey, status, pais]);
+
   const opcoesPaises = useMemo(
     () =>
       SELECOES.map((s) => ({
@@ -53,6 +90,8 @@ export default function ChecklistPage() {
   const lista = useMemo(() => {
     const termo = semAcento(busca.trim().replace(/\s+/g, ''));
     const matchPrefixo = termo.match(/^([a-z]+)0*(\d+)$/i);
+    const snapshotValido =
+      status !== 'todas' && snapshot?.key === snapshotKey ? new Set(snapshot.ids) : null;
 
     return FIGURINHAS.filter((f) => {
       if (f.slotDeId) return false;
@@ -72,13 +111,19 @@ export default function ChecklistPage() {
         return false;
       }
 
-      if (status === 'tenho' && !temSlot(f.id)) return false;
-      if (status === 'repetidas' && duplicadasSlot(f.id) <= 0) return false;
-      if (status === 'nao_tenho' && temSlot(f.id)) return false;
+      if (status !== 'todas') {
+        if (snapshotValido) {
+          if (!snapshotValido.has(f.id)) return false;
+        } else {
+          if (status === 'tenho' && !temSlot(f.id)) return false;
+          if (status === 'repetidas' && duplicadasSlot(f.id) <= 0) return false;
+          if (status === 'nao_tenho' && temSlot(f.id)) return false;
+        }
+      }
 
       return true;
     });
-  }, [busca, pais, status, temSlot, duplicadasSlot]);
+  }, [busca, pais, status, snapshot, snapshotKey, temSlot, duplicadasSlot]);
 
   return (
     <>
@@ -200,12 +245,12 @@ export default function ChecklistPage() {
           {lista.length !== 1 ? 's' : ''}
         </div>
 
-        {lista.length === 0 ? (
+        {lista.length === 0 && status !== 'nao_tenho' ? (
           <div style={{ marginTop: 24 }}>
             <Empty description="Nenhuma figurinha com esses filtros" />
           </div>
         ) : (
-          <div style={{ marginTop: 12 }}>{renderBlocos(lista, temSlot, ordem)}</div>
+          <div style={{ marginTop: 12 }}>{renderBlocos(lista, temSlot, ordem, status, pais)}</div>
         )}
       </div>
       <HistoricoModal aberto={historicoAberto} onFechar={() => setHistoricoAberto(false)} />
@@ -216,7 +261,9 @@ export default function ChecklistPage() {
 function renderBlocos(
   lista: StickerType[],
   tem: (id: string) => boolean,
-  ordem: OrdemChecklist
+  ordem: OrdemChecklist,
+  status: FiltroStatus,
+  paisSelecionado: string | null
 ) {
   const porSelecao = new Map<string, StickerType[]>();
   const especiais: StickerType[] = [];
@@ -229,6 +276,18 @@ function renderBlocos(
       especiais.push(f);
     }
   });
+
+  // Quando o filtro "Não tenho" está ativo, países completos não aparecem em
+  // `porSelecao` porque já não restam slots faltantes. Aqui calculamos o total
+  // real por seleção para detectar esses casos e mostrar o header como completo.
+  const totaisPorSelecao = new Map<string, number>();
+  if (status === 'nao_tenho') {
+    FIGURINHAS.forEach((f) => {
+      if (f.slotDeId) return;
+      if (f.tipo !== 'selecao' || !f.selecaoId) return;
+      totaisPorSelecao.set(f.selecaoId, (totaisPorSelecao.get(f.selecaoId) ?? 0) + 1);
+    });
+  }
 
   const blocos: React.ReactNode[] = [];
 
@@ -254,7 +313,10 @@ function renderBlocos(
 
   selecoesOrdenadas.forEach((sel) => {
     const figs = porSelecao.get(sel.id);
-    if (!figs?.length) return;
+    const total = totaisPorSelecao.get(sel.id) ?? 0;
+    const completo =
+      status === 'nao_tenho' && !figs?.length && total > 0 && (!paisSelecionado || paisSelecionado === sel.id);
+    if (!figs?.length && !completo) return;
     const prefixoGrupo = ordem === 'grupos' && sel.grupo ? `Grupo ${sel.grupo} · ` : '';
     const numero = SELECOES.findIndex((s) => s.id === sel.id) + 1;
     const sufixoEn = sel.nomeEn && sel.nomeEn !== sel.nome ? ` / ${sel.nomeEn}` : '';
@@ -263,8 +325,9 @@ function renderBlocos(
         key={sel.id}
         titulo={`${prefixoGrupo}#${numero} · pg ${formatarPaginas(sel)} ${sel.bandeira} ${sel.nome}${sufixoEn} (${sel.id})`}
         cor={sel.cor}
-        figs={figs}
+        figs={figs ?? []}
         tem={tem}
+        completoSemFaltantes={completo ? total : undefined}
       />
     );
   });
@@ -317,13 +380,17 @@ function GrupoFigurinhas({
   cor,
   figs,
   tem,
+  completoSemFaltantes,
 }: {
   titulo: string;
   cor: string;
   figs: StickerType[];
   tem: (id: string) => boolean;
+  completoSemFaltantes?: number;
 }) {
-  const coletadas = figs.filter((f) => tem(f.id)).length;
+  const ehCompleto = completoSemFaltantes !== undefined;
+  const coletadas = ehCompleto ? completoSemFaltantes : figs.filter((f) => tem(f.id)).length;
+  const totalExibido = ehCompleto ? completoSemFaltantes : figs.length;
 
   return (
     <div style={{ marginBottom: 18 }}>
@@ -333,22 +400,40 @@ function GrupoFigurinhas({
         <div
           style={{
             background: 'rgba(255,255,255,0.06)',
-            color: coletadas >= figs.length ? '#22c55e' : '#9aa6c9',
+            color: coletadas >= totalExibido ? '#22c55e' : '#9aa6c9',
             fontSize: 11,
             fontWeight: 700,
             padding: '2px 8px',
             borderRadius: 10,
           }}
         >
-          {coletadas}/{figs.length}
+          {coletadas}/{totalExibido}
         </div>
+        {ehCompleto && (
+          <div
+            style={{
+              background: 'rgba(34,197,94,0.15)',
+              color: '#22c55e',
+              fontSize: 10,
+              fontWeight: 700,
+              padding: '2px 8px',
+              borderRadius: 10,
+              textTransform: 'uppercase',
+              letterSpacing: 0.6,
+            }}
+          >
+            Completo
+          </div>
+        )}
         <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.08)' }} />
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
-        {figs.map((s) => (
-          <Sticker key={s.id} sticker={s} size={78} />
-        ))}
-      </div>
+      {figs.length > 0 && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+          {figs.map((s) => (
+            <Sticker key={s.id} sticker={s} size={78} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
