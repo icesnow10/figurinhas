@@ -1,6 +1,6 @@
 'use client';
 
-import { Button, Empty, Radio, Select, type RefSelectProps } from 'antd';
+import { Button, Empty, Radio, Select, Switch, type RefSelectProps } from 'antd';
 import { History, Search, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
@@ -16,6 +16,7 @@ import { usePersistedState } from '@/resources/hooks/usePersistedState';
 import type { Sticker as StickerType } from '@/resources/types';
 
 type FiltroStatus = 'todas' | 'tenho' | 'repetidas' | 'nao_tenho';
+type FiltroCategoria = 'todos' | 'selecoes' | 'especiais';
 type OrdemChecklist = 'grupos' | 'alfabetica' | 'alfabetica-en' | 'completude';
 
 const semAcento = (s: string) =>
@@ -34,9 +35,17 @@ export default function ChecklistPage() {
     'figurinhas:checklist:status',
     'todas'
   );
+  const [categoria, setCategoria] = usePersistedState<FiltroCategoria>(
+    'figurinhas:checklist:categoria',
+    'todos'
+  );
   const [ordem, setOrdem] = usePersistedState<OrdemChecklist>(
     'figurinhas:checklist:ordem',
     'grupos'
+  );
+  const [mostrarCompletos, setMostrarCompletos] = usePersistedState<boolean>(
+    'figurinhas:checklist:mostrarCompletos',
+    true
   );
   const [historicoAberto, setHistoricoAberto] = useState(false);
   const paisesSelectRef = useRef<RefSelectProps>(null);
@@ -95,6 +104,8 @@ export default function ChecklistPage() {
 
     return FIGURINHAS.filter((f) => {
       if (f.slotDeId) return false;
+      if (categoria === 'selecoes' && f.tipo !== 'selecao') return false;
+      if (categoria === 'especiais' && f.tipo !== 'especial') return false;
       if (termo) {
         const cod = semAcento(f.codigo);
         const nome = semAcento(f.nome);
@@ -123,7 +134,7 @@ export default function ChecklistPage() {
 
       return true;
     });
-  }, [busca, pais, status, snapshot, snapshotKey, temSlot, duplicadasSlot]);
+  }, [busca, pais, status, categoria, snapshot, snapshotKey, temSlot, duplicadasSlot]);
 
   return (
     <>
@@ -224,6 +235,21 @@ export default function ChecklistPage() {
           </div>
 
           <div>
+            <label style={filterLabelStyle}>Categoria</label>
+            <Radio.Group
+              optionType="button"
+              buttonStyle="solid"
+              value={categoria}
+              onChange={(e) => setCategoria(e.target.value)}
+              options={[
+                { label: 'Todos', value: 'todos' },
+                { label: 'Selecoes', value: 'selecoes' },
+                { label: 'Especiais', value: 'especiais' },
+              ]}
+            />
+          </div>
+
+          <div>
             <label style={filterLabelStyle}>Ordenar</label>
             <Radio.Group
               optionType="button"
@@ -238,6 +264,35 @@ export default function ChecklistPage() {
               ]}
             />
           </div>
+
+          {status === 'nao_tenho' && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 12,
+                padding: '8px 10px',
+                borderRadius: 8,
+                background: 'rgba(255,255,255,0.04)',
+                border: '1px solid rgba(255,255,255,0.08)',
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ color: '#fff', fontSize: 13, fontWeight: 600 }}>
+                  Mostrar países completos
+                </div>
+                <div style={{ color: '#9aa6c9', fontSize: 11, marginTop: 2 }}>
+                  Exibe o cabeçalho dos países sem faltantes com badge Completo.
+                </div>
+              </div>
+              <Switch
+                checked={mostrarCompletos}
+                onChange={setMostrarCompletos}
+                size="small"
+              />
+            </div>
+          )}
         </div>
 
         <div style={{ marginTop: 12, fontSize: 12, color: '#9aa6c9' }}>
@@ -245,12 +300,12 @@ export default function ChecklistPage() {
           {lista.length !== 1 ? 's' : ''}
         </div>
 
-        {lista.length === 0 && status !== 'nao_tenho' ? (
+        {lista.length === 0 && !(status === 'nao_tenho' && mostrarCompletos) ? (
           <div style={{ marginTop: 24 }}>
             <Empty description="Nenhuma figurinha com esses filtros" />
           </div>
         ) : (
-          <div style={{ marginTop: 12 }}>{renderBlocos(lista, temSlot, ordem, status, pais)}</div>
+          <div style={{ marginTop: 12 }}>{renderBlocos(lista, temSlot, ordem, status, pais, mostrarCompletos, categoria)}</div>
         )}
       </div>
       <HistoricoModal aberto={historicoAberto} onFechar={() => setHistoricoAberto(false)} />
@@ -263,7 +318,9 @@ function renderBlocos(
   tem: (id: string) => boolean,
   ordem: OrdemChecklist,
   status: FiltroStatus,
-  paisSelecionado: string | null
+  paisSelecionado: string | null,
+  mostrarCompletos: boolean,
+  categoria: FiltroCategoria
 ) {
   const porSelecao = new Map<string, StickerType[]>();
   const especiais: StickerType[] = [];
@@ -281,7 +338,7 @@ function renderBlocos(
   // `porSelecao` porque já não restam slots faltantes. Aqui calculamos o total
   // real por seleção para detectar esses casos e mostrar o header como completo.
   const totaisPorSelecao = new Map<string, number>();
-  if (status === 'nao_tenho') {
+  if (status === 'nao_tenho' && mostrarCompletos && categoria !== 'especiais') {
     FIGURINHAS.forEach((f) => {
       if (f.slotDeId) return;
       if (f.tipo !== 'selecao' || !f.selecaoId) return;
@@ -315,7 +372,11 @@ function renderBlocos(
     const figs = porSelecao.get(sel.id);
     const total = totaisPorSelecao.get(sel.id) ?? 0;
     const completo =
-      status === 'nao_tenho' && !figs?.length && total > 0 && (!paisSelecionado || paisSelecionado === sel.id);
+      status === 'nao_tenho' &&
+      mostrarCompletos &&
+      !figs?.length &&
+      total > 0 &&
+      (!paisSelecionado || paisSelecionado === sel.id);
     if (!figs?.length && !completo) return;
     const prefixoGrupo = ordem === 'grupos' && sel.grupo ? `Grupo ${sel.grupo} · ` : '';
     const numero = SELECOES.findIndex((s) => s.id === sel.id) + 1;

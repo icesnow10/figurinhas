@@ -159,6 +159,18 @@ export const ANUNCIOS: Anuncio[] = [
         descricao:
           'No Checklist, marcar uma figurinha como conseguida não a remove da visão atual. Buscar, ordenar e trocar de página também mantêm a lista estável. Só ao trocar o filtro ou o país a lista é recalculada.',
       },
+      {
+        emoji: '👁️',
+        titulo: 'Toggle Mostrar países completos',
+        descricao:
+          'No Checklist, dentro do filtro "Não tenho", um interruptor permite esconder os cabeçalhos de países já completos quando você quer focar só nos que faltam.',
+      },
+      {
+        emoji: '🎴',
+        titulo: 'Filtro de Categoria (Seleções / Especiais)',
+        descricao:
+          'Novo filtro no Checklist para limitar a visão a Seleções, Especiais ou Todos — útil para focar em McDonald\'s, Coca-Cola, introdução ou campeões.',
+      },
     ],
   },
 ];
