@@ -21,6 +21,7 @@ export interface Perfil {
   criadoEm: number;
   ultimoLoginEm?: number;
   pin?: string; // 4 dígitos, opcional
+  ultimoAnuncioVisto?: string;
 }
 
 export interface PerfilPublico {
@@ -29,6 +30,7 @@ export interface PerfilPublico {
   criadoEm: number;
   ultimoLoginEm?: number;
   temPin: boolean;
+  ultimoAnuncioVisto?: string;
 }
 
 function publicar(p: Perfil): PerfilPublico {
@@ -38,6 +40,7 @@ function publicar(p: Perfil): PerfilPublico {
     criadoEm: p.criadoEm,
     ultimoLoginEm: p.ultimoLoginEm,
     temPin: !!p.pin,
+    ultimoAnuncioVisto: p.ultimoAnuncioVisto,
   };
 }
 
@@ -199,8 +202,9 @@ export async function PATCH(req: NextRequest) {
     nome?: string;
     pin?: string | null; // null para remover, string para definir
     pinAtual?: string; // necessário se trocar pin de perfil já protegido
+    ultimoAnuncioVisto?: string;
   };
-  const { id, nome, pin, pinAtual } = body;
+  const { id, nome, pin, pinAtual, ultimoAnuncioVisto } = body;
   if (!id) return NextResponse.json({ erro: 'id obrigatório' }, { status: 400 });
   const perfis = await lerPerfis();
   const idx = perfis.findIndex((p) => p.id === id);
@@ -232,6 +236,9 @@ export async function PATCH(req: NextRequest) {
   };
   if (pin === null) delete atualizado.pin;
   else if (typeof pin === 'string') atualizado.pin = pin;
+  if (typeof ultimoAnuncioVisto === 'string' && ultimoAnuncioVisto.length <= 100) {
+    atualizado.ultimoAnuncioVisto = ultimoAnuncioVisto;
+  }
 
   perfis[idx] = atualizado;
   await salvarPerfis(perfis);

@@ -18,6 +18,7 @@ interface ColecaoContextType {
   estado: ColecaoEstado;
   carregado: boolean;
   sincronizando: boolean;
+  sincronizandoId: (id: string) => boolean;
   quantidade: (id: string) => number;
   quantidadeSlot: (id: string) => number;
   tem: (id: string) => boolean;
@@ -48,6 +49,16 @@ export function ColecaoProvider({ children }: { children: ReactNode }) {
   const [carregado, setCarregado] = useState(false);
   const [sincronizando, setSincronizando] = useState(false);
   const ultimoFetchRef = useRef(0);
+  const pendingByIdRef = useRef<Map<string, number>>(new Map());
+  const chainByIdRef = useRef<Map<string, Promise<unknown>>>(new Map());
+  const [pendingVersion, setPendingVersion] = useState(0);
+
+  const sincronizandoId = useCallback(
+    (id: string) => (pendingByIdRef.current.get(id) ?? 0) > 0,
+    // pendingVersion força re-render quando o mapa muda
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pendingVersion]
+  );
 
   const url = useCallback(
     (extra = '') =>
@@ -56,15 +67,54 @@ export function ColecaoProvider({ children }: { children: ReactNode }) {
   );
 
   const patchServer = useCallback(
-    async (id: string, quantidade: number) => {
+    (id: string, quantidade: number) => {
       if (!perfilCarregado || perfilBloqueado) return;
-      try {
-        await fetch(url(), {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id, quantidade }),
+
+      const incPendente = () => {
+        const atual = pendingByIdRef.current.get(id) ?? 0;
+        pendingByIdRef.current.set(id, atual + 1);
+        setPendingVersion((v) => v + 1);
+      };
+      const decPendente = () => {
+        const atual = pendingByIdRef.current.get(id) ?? 0;
+        if (atual <= 1) pendingByIdRef.current.delete(id);
+        else pendingByIdRef.current.set(id, atual - 1);
+        setPendingVersion((v) => v + 1);
+      };
+
+      incPendente();
+      const anterior = chainByIdRef.current.get(id) ?? Promise.resolve();
+      const proxima = anterior
+        .catch(() => {})
+        .then(async () => {
+          try {
+            const res = await fetch(url(), {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id, quantidade }),
+            });
+            if (!res.ok) throw new Error(`PATCH ${id} falhou: ${res.status}`);
+          } catch (err) {
+            // retry simples — útil para falhas momentâneas de rede
+            try {
+              await new Promise((r) => setTimeout(r, 600));
+              await fetch(url(), {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id, quantidade }),
+              });
+            } catch (err2) {
+              console.warn('Falha ao sincronizar figurinha', id, err2);
+            }
+          }
+        })
+        .finally(() => {
+          if (chainByIdRef.current.get(id) === proxima) {
+            chainByIdRef.current.delete(id);
+          }
+          decPendente();
         });
-      } catch {}
+      chainByIdRef.current.set(id, proxima);
     },
     [perfilBloqueado, perfilCarregado, url]
   );
@@ -246,6 +296,7 @@ export function ColecaoProvider({ children }: { children: ReactNode }) {
     estado,
     carregado,
     sincronizando,
+    sincronizandoId,
     quantidade,
     quantidadeSlot,
     tem,

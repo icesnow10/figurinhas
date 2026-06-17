@@ -5,7 +5,7 @@ import { useMemo, useState } from 'react';
 import { Empty, Input, Segmented } from 'antd';
 import { CheckCircle2, Search } from 'lucide-react';
 import { useColecao } from '@/resources/hooks/useColecao';
-import { FIGURINHAS } from '@/resources/data/figurinhas';
+import { FIGURINHAS, idsAlternativosDoSlot } from '@/resources/data/figurinhas';
 import { SELECOES } from '@/resources/data/selecoes';
 import { SECOES_ESPECIAIS } from '@/resources/data/especiais';
 
@@ -31,10 +31,13 @@ export function CompletudeChart() {
     const porEspecial = new Map<string, { total: number; coletadas: number }>();
 
     FIGURINHAS.forEach((f) => {
+      if (f.slotDeId) return;
       if (f.tipo === 'selecao' && f.selecaoId) {
         const cur = porSelecao.get(f.selecaoId) ?? { total: 0, coletadas: 0 };
         cur.total += 1;
-        if ((estado[f.id] ?? 0) > 0) cur.coletadas += 1;
+        // Considera variantes alternativas (ex.: McDonald's #13) como o mesmo slot.
+        const possui = idsAlternativosDoSlot(f.id).some((alt) => (estado[alt] ?? 0) > 0);
+        if (possui) cur.coletadas += 1;
         porSelecao.set(f.selecaoId, cur);
       } else if (f.tipo === 'especial' && f.selecaoId) {
         const cur = porEspecial.get(f.selecaoId) ?? { total: 0, coletadas: 0 };
@@ -42,6 +45,17 @@ export function CompletudeChart() {
         if ((estado[f.id] ?? 0) > 0) cur.coletadas += 1;
         porEspecial.set(f.selecaoId, cur);
       }
+    });
+
+    // Conta as figurinhas McDonald's separadamente, como seção própria de
+    // especiais (já que têm slotDeId e foram puladas acima).
+    FIGURINHAS.forEach((f) => {
+      if (!f.slotDeId) return;
+      if (f.tipo !== 'especial' || !f.selecaoId) return;
+      const cur = porEspecial.get(f.selecaoId) ?? { total: 0, coletadas: 0 };
+      cur.total += 1;
+      if ((estado[f.id] ?? 0) > 0) cur.coletadas += 1;
+      porEspecial.set(f.selecaoId, cur);
     });
 
     const selecoes: LinhaProgresso[] = SELECOES.map((s) => {

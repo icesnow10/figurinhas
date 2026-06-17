@@ -1,12 +1,12 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Button, Collapse, Tabs, Empty, Input, Skeleton, Switch, Tag, message } from 'antd';
+import { Button, Collapse, Progress, Tabs, Empty, Input, Skeleton, Switch, Tag, message } from 'antd';
 import { Copy, Eye, Plus, Trash2 } from 'lucide-react';
 import { Header } from '@/components/layout/Header';
 import { useColecao } from '@/resources/hooks/useColecao';
 import { usePerfil } from '@/resources/hooks/usePerfil';
-import { FIGURINHAS } from '@/resources/data/figurinhas';
+import { FIGURINHAS, idsAlternativosDoSlot } from '@/resources/data/figurinhas';
 import { SELECOES } from '@/resources/data/selecoes';
 import type { ColecaoEstado, Sticker as StickerType } from '@/resources/types';
 
@@ -65,7 +65,8 @@ function faltamPorSelecao(colecao: ColecaoEstado): Record<string, number> {
   const mapa: Record<string, number> = {};
   FIGURINHAS.forEach((f) => {
     if (f.tipo !== 'selecao' || !f.selecaoId) return;
-    if (!temNoEstado(colecao, f.id)) {
+    if (f.slotDeId) return;
+    if (!temSlotNoEstado(colecao, f.id)) {
       mapa[f.selecaoId] = (mapa[f.selecaoId] ?? 0) + 1;
     }
   });
@@ -124,6 +125,18 @@ interface AmigoSalvo {
   nome: string;
 }
 
+interface ResumoAlbum {
+  coletadas: number;
+  totalAlbum: number;
+  faltantes: number;
+  percentual: number;
+}
+
+interface RankingItem extends ResumoAlbum {
+  id: string;
+  nome: string;
+}
+
 function isBrilhante(sticker: StickerType) {
   return sticker.tipo === 'especial' || (sticker.tipo === 'selecao' && sticker.numero === 1);
 }
@@ -132,12 +145,27 @@ function temNoEstado(estado: ColecaoEstado, stickerId: string) {
   return (estado[stickerId] ?? 0) > 0;
 }
 
+function temSlotNoEstado(estado: ColecaoEstado, stickerId: string) {
+  return idsAlternativosDoSlot(stickerId).some((alt) => (estado[alt] ?? 0) > 0);
+}
+
+function quantidadeNoSlot(estado: ColecaoEstado, stickerId: string) {
+  return idsAlternativosDoSlot(stickerId).reduce(
+    (acc, alt) => acc + (estado[alt] ?? 0),
+    0
+  );
+}
+
 function duplicadasNoEstado(estado: ColecaoEstado, stickerId: string) {
   return Math.max(0, (estado[stickerId] ?? 0) - 1);
 }
 
+function duplicadasSlotNoEstado(estado: ColecaoEstado, stickerId: string) {
+  return Math.max(0, quantidadeNoSlot(estado, stickerId) - 1);
+}
+
 export default function TrocasPage() {
-  const { duplicadas, estado, tem, recarregar } = useColecao();
+  const { estado, recarregar } = useColecao();
   const { perfilId } = usePerfil();
   const [amigos, setAmigos] = useState<AmigoSalvo[]>([]);
   const [carregandoAmigos, setCarregandoAmigos] = useState(true);
@@ -149,11 +177,47 @@ export default function TrocasPage() {
   const [trocaJustaPorAmigo, setTrocaJustaPorAmigo] = useState<Record<string, boolean>>({});
   const [trocaCompletar, setTrocaCompletar] = useState(false);
   const [apenasMatch, setApenasMatch] = useState(false);
+  const [resumoPorAmigo, setResumoPorAmigo] = useState<Record<string, ResumoAlbum>>({});
+
+  useEffect(() => {
+    let ativo = true;
+    fetch('/api/ranking', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : { ranking: [] }))
+      .then((data: { ranking?: RankingItem[] }) => {
+        if (!ativo) return;
+        const mapa: Record<string, ResumoAlbum> = {};
+        (data.ranking ?? []).forEach((item) => {
+          mapa[item.id] = {
+            coletadas: item.coletadas,
+            totalAlbum: item.totalAlbum,
+            faltantes: item.faltantes,
+            percentual: item.percentual,
+          };
+        });
+        setResumoPorAmigo(mapa);
+      })
+      .catch(() => {});
+    return () => {
+      ativo = false;
+    };
+  }, []);
 
   const meusFaltantesPorSelecao = useMemo(() => faltamPorSelecao(estado), [estado]);
 
-  const repetidas = FIGURINHAS.filter((f) => duplicadas(f.id) > 0);
-  const faltantes = FIGURINHAS.filter((f) => !tem(f.id));
+  const repetidas = FIGURINHAS.filter(
+    (f) => !f.slotDeId && duplicadasSlotNoEstado(estado, f.id) > 0
+  );
+  const repetidasExtras = repetidas.reduce(
+    (acc, f) => acc + duplicadasSlotNoEstado(estado, f.id),
+    0
+  );
+  const repetidasExtrasAlemDaPrimeira = Math.max(
+    0,
+    repetidasExtras - repetidas.length
+  );
+  const faltantes = FIGURINHAS.filter(
+    (f) => !f.slotDeId && !temSlotNoEstado(estado, f.id)
+  );
   const textoRepetidas = useMemo(() => formatarMensagem(repetidas), [repetidas]);
   const textoFaltantes = useMemo(
     () =>
@@ -349,12 +413,68 @@ export default function TrocasPage() {
                         const id = Array.isArray(key) ? key[0] : key;
                         setAmigoAtivoId(id ? String(id) : null);
                       }}
-                      items={amigos.map((amigo) => ({
+                      items={amigos.map((amigo) => {
+                        const resumo = resumoPorAmigo[amigo.id];
+                        return ({
                         key: amigo.id,
                         label: (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <Eye size={15} color="#22c55e" />
-                            <span style={{ color: '#fff', fontWeight: 700 }}>{amigo.nome}</span>
+                          <div
+                            style={{
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: 4,
+                              minWidth: 0,
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <Eye size={15} color="#22c55e" />
+                              <span
+                                style={{
+                                  color: '#fff',
+                                  fontWeight: 700,
+                                  flex: 1,
+                                  minWidth: 0,
+                                  whiteSpace: 'nowrap',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                }}
+                              >
+                                {amigo.nome}
+                              </span>
+                              {resumo && (
+                                <>
+                                  <span style={{ color: '#22c55e', fontSize: 11, fontWeight: 700 }}>
+                                    {resumo.coletadas}/{resumo.totalAlbum}
+                                  </span>
+                                  <span
+                                    style={{
+                                      color: '#fff',
+                                      fontSize: 11,
+                                      fontWeight: 800,
+                                      minWidth: 32,
+                                      textAlign: 'right',
+                                    }}
+                                  >
+                                    {resumo.percentual}%
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                            {resumo && (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <Progress
+                                  percent={resumo.percentual}
+                                  showInfo={false}
+                                  strokeColor="#22c55e"
+                                  trailColor="rgba(255,255,255,0.08)"
+                                  size="small"
+                                  style={{ margin: 0, flex: 1 }}
+                                />
+                                <span style={{ color: '#9aa6c9', fontSize: 10 }}>
+                                  faltam {resumo.faltantes}
+                                </span>
+                              </div>
+                            )}
                           </div>
                         ),
                         extra: (
@@ -389,7 +509,8 @@ export default function TrocasPage() {
                           ) : (
                             <div style={{ color: '#9aa6c9' }}>Clique para ver as trocas.</div>
                           ),
-                      }))}
+                        });
+                      })}
                     />
                   )}
                 </div>
@@ -401,7 +522,11 @@ export default function TrocasPage() {
               children: (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                   <MensagemWhatsApp
-                    titulo={`Repetidas (${repetidas.length})`}
+                    titulo={`Repetidas (${repetidas.length}${
+                      repetidasExtrasAlemDaPrimeira > 0
+                        ? ` +${repetidasExtrasAlemDaPrimeira} = ${repetidasExtras}`
+                        : ''
+                    })`}
                     texto={textoRepetidas}
                     onCopiar={() => copiarTexto(textoRepetidas)}
                   />

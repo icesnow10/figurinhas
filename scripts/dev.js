@@ -10,7 +10,7 @@ const lanIp = Object.values(os.networkInterfaces())
 const nextBin = require.resolve('next/dist/bin/next');
 const child = spawn(
   process.execPath,
-  [nextBin, 'dev', '--turbo', '-H', '0.0.0.0', '-p', port],
+  [nextBin, 'dev', '-H', '0.0.0.0', '-p', port],
   { stdio: ['inherit', 'pipe', 'inherit'] }
 );
 

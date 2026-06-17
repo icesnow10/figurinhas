@@ -1036,6 +1036,21 @@ const IMAGENS_REAIS: Record<string, string> = {
   FWC17: '/shiny/htry_017.webp',
   FWC18: '/shiny/htry_018.webp',
   FWC19: '/shiny/htry_019.webp',
+
+  CC01: '/coca_cola/cc01_lamine_yamal.png',
+  CC02: '/coca_cola/cc02_joshua_kimmich.png',
+  CC03: '/coca_cola/cc03_harry_kane.png',
+  CC04: '/coca_cola/cc04_santiago_gimenez.png',
+  CC05: '/coca_cola/cc05_josko_gvardiol.png',
+  CC06: '/coca_cola/cc06_federico_valverde.png',
+  CC07: '/coca_cola/cc07_jefferson_lerma.png',
+  CC08: '/coca_cola/cc08_enner_valencia.png',
+  CC09: '/coca_cola/cc09_gabriel_magalhaes.png',
+  CC10: '/coca_cola/cc10_virgil_van_dijk.png',
+  CC11: '/coca_cola/cc11_alphonso_davies.png',
+  CC12: '/coca_cola/cc12_emiliano_martinez.png',
+  CC13: '/coca_cola/cc13_raul_jimenez.png',
+  CC14: '/coca_cola/cc14_lautaro_martinez.png',
 };
 
 const NOMES_JOGADORES: Record<string, string> = {
@@ -2028,12 +2043,16 @@ function gerarEspeciais(): Sticker[] {
   NOMES_COCA_COLA.forEach((nome, idx) => {
     const numero = idx + 1;
     const codigo = `CC${String(numero).padStart(2, '0')}`;
+    const imagemReal = IMAGENS_REAIS[codigo];
+    const imagem = imagemReal
+      ? imagemReal.replace(/\/([^/]+)\.(jpe?g|png|webp)$/i, '/thumbs/$1.webp')
+      : placeholderImage(codigo, 'E41E2B', 'FFFFFF');
     list.push({
       id: codigo,
       codigo,
       numero,
       nome,
-      imagem: placeholderImage(codigo, 'E41E2B', 'FFFFFF'),
+      imagem,
       raridade: 'especial',
       tipo: 'especial',
       selecaoId: 'COCA',

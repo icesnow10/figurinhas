@@ -11,6 +11,7 @@ import { EspecialCard } from '@/components/collection/EspecialCard';
 import { ColecaoChart } from '@/components/charts/ColecaoChart';
 import { CompletudeChart } from '@/components/charts/CompletudeChart';
 import { TopRepetidasChart } from '@/components/charts/TopRepetidasChart';
+import { RankingUsuarios } from '@/components/ranking/RankingUsuarios';
 import { SELECOES, CONFEDERACOES } from '@/resources/data/selecoes';
 import { SECOES_ESPECIAIS } from '@/resources/data/especiais';
 import { FIGURINHAS } from '@/resources/data/figurinhas';
@@ -185,6 +186,10 @@ export default function Home() {
 
         <div style={{ marginTop: 14 }}>
           <ColecaoChart />
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <RankingUsuarios />
         </div>
 
         {!ocultarWallOfShame && (

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Check, Copy } from 'lucide-react';
+import { Check, Copy, Loader2 } from 'lucide-react';
 import type { Sticker as StickerType } from '@/resources/types';
 import { useColecao } from '@/resources/hooks/useColecao';
 import { useAdicionarComMcd } from '@/resources/hooks/usePerguntaMcd';
@@ -18,7 +18,7 @@ interface Props {
 }
 
 export function Sticker({ sticker, size = 92 }: Props) {
-  const { tem, temSlot, duplicadasSlot } = useColecao();
+  const { tem, temSlot, duplicadasSlot, sincronizandoId } = useColecao();
   const adicionarComMcd = useAdicionarComMcd();
   const [openModal, setOpenModal] = useState(false);
 
@@ -28,6 +28,7 @@ export function Sticker({ sticker, size = 92 }: Props) {
   const mcdId = obterIdMcDonalds(sticker.id);
   const temRegular = tem(sticker.id);
   const temMcd = mcdId ? tem(mcdId) : false;
+  const salvando = sincronizandoId(sticker.id) || (!!mcdId && sincronizandoId(mcdId));
   const ehVisualMcd = !!(mcdId && temMcd);
   const stickerVisivel = ehVisualMcd ? figurinhaPorId(mcdId!) ?? sticker : sticker;
   const mostrarBadgeMcd = !!(mcdId && temMcd);
@@ -190,6 +191,24 @@ export function Sticker({ sticker, size = 92 }: Props) {
           >
             <Copy size={10} strokeWidth={3} />
             {dupes}
+          </div>
+        )}
+
+        {salvando && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              background: 'rgba(10,18,48,0.45)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#fff',
+              pointerEvents: 'none',
+              animation: 'stickerSpin 0.9s linear infinite',
+            }}
+          >
+            <Loader2 size={20} />
           </div>
         )}
       </div>

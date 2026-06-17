@@ -23,11 +23,13 @@ export interface Sticker {
 export interface Selecao {
   id: string;
   nome: string;
+  nomeEn: string;
   bandeira: string;
   confederacao: Confederacao;
   cor: string;
   totalFigurinhas: number;
   grupo?: string;
+  paginas: [number, number];
 }
 
 export interface SecaoEspecial {

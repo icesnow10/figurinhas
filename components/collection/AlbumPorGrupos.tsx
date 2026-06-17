@@ -6,7 +6,7 @@ import type { Selecao } from '@/resources/types';
 import { figurinhasPorSelecao } from '@/resources/data/figurinhas';
 import { useColecao } from '@/resources/hooks/useColecao';
 
-export type OrdemPaises = 'alfabetica' | 'grupos';
+export type OrdemPaises = 'alfabetica' | 'alfabetica-en' | 'grupos' | 'completude';
 export type DirecaoOrdem = 'asc' | 'desc';
 export type FiltroCompletude = 'todas' | 'completas' | 'incompletas';
 
@@ -30,19 +30,37 @@ const COLUNAS_ALFA: Record<DensidadeCard, number> = {
   grande: 1,
 };
 
+const semAcento = (s: string) =>
+  s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+
 function filtrarSelecoes(busca: string) {
-  const termo = busca.trim().toLowerCase();
+  const termo = semAcento(busca.trim());
   return SELECOES.filter(
     (s) =>
       !termo ||
-      s.nome.toLowerCase().includes(termo) ||
-      s.id.toLowerCase().includes(termo)
+      semAcento(s.nome).includes(termo) ||
+      semAcento(s.nomeEn).includes(termo) ||
+      semAcento(s.id).includes(termo)
   );
 }
 
-function ordenarPorNome(selecoes: Selecao[], direcao: DirecaoOrdem) {
+function razaoCompletude(selecaoId: string, tem: (id: string) => boolean): number {
+  const figs = figurinhasPorSelecao(selecaoId);
+  if (!figs.length) return 0;
+  const coletadas = figs.filter((f) => tem(f.id)).length;
+  return coletadas / figs.length;
+}
+
+function ordenarPorNome(
+  selecoes: Selecao[],
+  direcao: DirecaoOrdem,
+  locale: 'pt-BR' | 'en' = 'pt-BR'
+) {
   return [...selecoes].sort((a, b) => {
-    const resultado = a.nome.localeCompare(b.nome, 'pt-BR', { sensitivity: 'base' });
+    const resultado =
+      locale === 'en'
+        ? a.id.localeCompare(b.id, 'en')
+        : a.nome.localeCompare(b.nome, 'pt-BR', { sensitivity: 'base' });
     return direcao === 'asc' ? resultado : -resultado;
   });
 }
@@ -88,14 +106,31 @@ export function AlbumPorGrupos({
 
   const selecoesFiltradas = filtrarPorCompletude(filtrarSelecoes(busca));
 
-  if (ordem === 'alfabetica') {
+  if (ordem === 'alfabetica' || ordem === 'alfabetica-en') {
+    const locale = ordem === 'alfabetica-en' ? 'en' : 'pt-BR';
     return (
       <div style={{ marginTop: 12 }}>
         {gradeSelecoes(
-          ordenarPorNome(selecoesFiltradas, direcao),
+          ordenarPorNome(selecoesFiltradas, direcao, locale),
           COLUNAS_ALFA[densidade],
           densidade
         )}
+      </div>
+    );
+  }
+
+  if (ordem === 'completude') {
+    // Most complete first when direcao=asc (mirrors mental "best first"); flip
+    // for desc. Ties broken by name to keep ordering stable.
+    const ordenado = [...selecoesFiltradas].sort((a, b) => {
+      const ra = razaoCompletude(a.id, tem);
+      const rb = razaoCompletude(b.id, tem);
+      if (rb !== ra) return direcao === 'asc' ? rb - ra : ra - rb;
+      return a.nome.localeCompare(b.nome, 'pt-BR', { sensitivity: 'base' });
+    });
+    return (
+      <div style={{ marginTop: 12 }}>
+        {gradeSelecoes(ordenado, COLUNAS_ALFA[densidade], densidade)}
       </div>
     );
   }
@@ -105,10 +140,8 @@ export function AlbumPorGrupos({
   return (
     <div>
       {grupos.map((grupo) => {
-        const sels = ordenarPorNome(
-          selecoesFiltradas.filter((s) => s.grupo === grupo),
-          direcao
-        );
+        const noGrupo = selecoesFiltradas.filter((s) => s.grupo === grupo);
+        const sels = direcao === 'asc' ? noGrupo : [...noGrupo].reverse();
         if (!sels.length) return null;
 
         return (
